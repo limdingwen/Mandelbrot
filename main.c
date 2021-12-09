@@ -10,8 +10,8 @@
 #define WINDOW_WIDTH 900
 #define WINDOW_HEIGHT 600
 #define PIXELS_SIZE (WINDOW_WIDTH * WINDOW_HEIGHT * 4)
-#define PREVIEW_WIDTH 90
-#define PREVIEW_HEIGHT 60
+#define PREVIEW_WIDTH 180
+#define PREVIEW_HEIGHT 120
 
 #define THREADS 8
 #define SHOW_X_INTERVAL 5
@@ -43,9 +43,12 @@ struct thread_block thread_blocks[THREADS] = {
 
 #define INITIAL_CENTER_X -0.74529f
 #define INITIAL_CENTER_Y 0.113075f
-#define INITIAL_SIZE 0.0001f
+#define INITIAL_SIZE 2
 #define SIZE_RATIO_X 1.5f
 #define SIZE_RATIO_Y 1
+
+#define PAN_SPEED 1
+#define ZOOM_SPEED 1
 
 // Color
 
@@ -104,17 +107,18 @@ struct mb_result
 
 // Thread
 
-uint8_t* stored_pixels = NULL;
-
 struct thread_data
 {
     int x_start;
     int x_end;
     int y_start;
     int y_end;
+    int width;
+    int height;
     float size;
     float center_x;
     float center_y;
+    uint8_t *pixels;
 };
 
 float calculateMathPos(float screenPos, float screenWidth, float size, float center)
@@ -143,12 +147,12 @@ void *thread(void *arg)
     for (int screen_x = data->x_start; screen_x <= data->x_end; screen_x++)
     {
         float math_x = calculateMathPos((float)screen_x,
-            WINDOW_WIDTH, data->size*SIZE_RATIO_X, data->center_x);
+            (float)data->width, data->size*SIZE_RATIO_X, data->center_x);
 
         for (int screen_y = data->y_start; screen_y <= data->y_end; screen_y++)
         {
-            float math_y = calculateMathPos(WINDOW_HEIGHT - (float)screen_y,
-                WINDOW_HEIGHT, data->size*SIZE_RATIO_Y, data->center_y);
+            float math_y = calculateMathPos((float)data->height - (float)screen_y,
+                (float)data->height, data->size*SIZE_RATIO_Y, data->center_y);
             struct mb_result result = process_mandelbrot(math_x, math_y);
 
             struct color color;
@@ -158,29 +162,32 @@ void *thread(void *arg)
                 color = color_lerp(OUTER_COLOR, INNER_COLOR,
                     (float)result.escape_iterations / MAX_COLOR_ITERATIONS);
             
-            int r_offset = (screen_y*WINDOW_WIDTH + screen_x)*4;
-            stored_pixels[r_offset + 0] = (uint8_t) color.r;
-            stored_pixels[r_offset + 1] = (uint8_t) color.g;
-            stored_pixels[r_offset + 2] = (uint8_t) color.b;
-            stored_pixels[r_offset + 3] = 255;
+            int r_offset = (screen_y*data->width + screen_x)*4;
+            data->pixels[r_offset + 0] = (uint8_t) color.r;
+            data->pixels[r_offset + 1] = (uint8_t) color.g;
+            data->pixels[r_offset + 2] = (uint8_t) color.b;
+            data->pixels[r_offset + 3] = 255;
         }
     }
 
-    pthread_exit(NULL);
+    // TODO: Extract function to be reused as blocking?
+    //pthread_exit(NULL);
+    return NULL;
 }
 
 // Main
 
 int main()
 {
-    int err;
+    //int err;
     int exit_code = EX_OK;
 
     // Start SDL
 
+    uint8_t *stored_pixels = NULL;
     SDL_Renderer *renderer = NULL;
     SDL_Window *window = NULL;
-    SDL_Texture *texture = NULL;
+    SDL_Texture *full_texture = NULL, *preview_texture = NULL;
 
     if (SDL_Init(SDL_INIT_VIDEO) < 0)
     {
@@ -194,11 +201,19 @@ int main()
         exit_code = EX_OSERR;
         goto cleanup;
     }
-    texture = SDL_CreateTexture(renderer,
+    full_texture = SDL_CreateTexture(renderer,
         SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_STREAMING, WINDOW_WIDTH, WINDOW_HEIGHT);
-    if (texture == NULL)
+    if (full_texture == NULL)
     {
-        fprintf(stderr, "Unable to create texture: %s\n", SDL_GetError());
+        fprintf(stderr, "Unable to create full texture: %s\n", SDL_GetError());
+        exit_code = EX_OSERR;
+        goto cleanup;
+    }
+    preview_texture = SDL_CreateTexture(renderer,
+        SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_STREAMING, PREVIEW_WIDTH, PREVIEW_HEIGHT);
+    if (preview_texture == NULL)
+    {
+        fprintf(stderr, "Unable to create preview texture: %s\n", SDL_GetError());
         exit_code = EX_OSERR;
         goto cleanup;
     }
@@ -217,9 +232,13 @@ int main()
         exit_code = EX_OSERR;
         goto cleanup;
     }
+    const uint8_t *keys = SDL_GetKeyboardState(NULL);
 
     bool running = true;
-    bool haveToRender = true;
+    uint64_t now = SDL_GetPerformanceCounter();
+    uint64_t last = 0;
+    float dt = 0;
+    //bool haveToRender = true;
     while (running)
     {
         // Handle events
@@ -237,6 +256,7 @@ int main()
 
         // Render mandelbrot
 
+/*
         if (haveToRender)
         {
             haveToRender = false;
@@ -246,7 +266,7 @@ int main()
             {
                 uint8_t *pixels;
                 int pitch;
-                if (SDL_LockTexture(texture, NULL, (void**)&pixels, &pitch) < 0)
+                if (SDL_LockTexture(full_texture, NULL, (void**)&pixels, &pitch) < 0)
                 {
                     fprintf(stderr, "Unable to lock texture: %s\n", SDL_GetError());
                     exit_code = EX_OSERR;
@@ -289,8 +309,8 @@ int main()
                 }
 
                 memcpy(pixels, stored_pixels, PIXELS_SIZE);
-                SDL_UnlockTexture(texture);
-                if (SDL_RenderCopy(renderer, texture, NULL, NULL) < 0)
+                SDL_UnlockTexture(full_texture);
+                if (SDL_RenderCopy(renderer, full_texture, NULL, NULL) < 0)
                 {
                     fprintf(stderr, "Unable to copy texture: %s\n", SDL_GetError());
                     exit_code = EX_OSERR;
@@ -301,16 +321,70 @@ int main()
 
             uint64_t end_time = SDL_GetPerformanceCounter();
             float time_taken = (float)(end_time - begin_time) / (float)SDL_GetPerformanceFrequency() * 1000;
-            printf("Time taken: %fms. Waiting for next click.\n", time_taken);
+            printf("Full render completed. Time taken: %fms.\n", time_taken);
         }
 
-        if (SDL_RenderCopy(renderer, texture, NULL, NULL) < 0)
+        if (SDL_RenderCopy(renderer, full_texture, NULL, NULL) < 0)
         {
             fprintf(stderr, "Unable to copy texture: %s\n", SDL_GetError());
             exit_code = EX_OSERR;
             goto cleanup;
         }
         SDL_RenderPresent(renderer);
+*/
+
+        // Handle preview input
+
+        if (keys[SDL_SCANCODE_W]) center_y += size * PAN_SPEED * dt;
+        if (keys[SDL_SCANCODE_A]) center_x -= size * PAN_SPEED * dt;
+        if (keys[SDL_SCANCODE_S]) center_y -= size * PAN_SPEED * dt;
+        if (keys[SDL_SCANCODE_D]) center_x += size * PAN_SPEED * dt;
+        if (keys[SDL_SCANCODE_R]) size -= size * ZOOM_SPEED * dt;
+        if (keys[SDL_SCANCODE_F]) size += size * ZOOM_SPEED * dt;
+
+        // Render preview mandelbrot
+        // TODO: Only render when needed
+
+        {
+            uint8_t *pixels;
+            int pitch;
+            if (SDL_LockTexture(preview_texture, NULL, (void**)&pixels, &pitch) < 0)
+            {
+                fprintf(stderr, "Unable to lock preview texture: %s\n", SDL_GetError());
+                exit_code = EX_OSERR;
+                goto cleanup;
+            }
+
+            struct thread_data data = {
+                0,
+                PREVIEW_WIDTH - 1,
+                0,
+                PREVIEW_HEIGHT - 1,
+                PREVIEW_WIDTH,
+                PREVIEW_HEIGHT,
+                size,
+                center_x,
+                center_y,
+                pixels
+            };
+            thread(&data);
+
+            SDL_UnlockTexture(preview_texture);
+            if (SDL_RenderCopy(renderer, preview_texture, NULL, NULL) < 0)
+            {
+                fprintf(stderr, "Unable to copy preview texture: %s\n", SDL_GetError());
+                exit_code = EX_OSERR;
+                goto cleanup;
+            }
+            SDL_RenderPresent(renderer);
+        }
+
+        // Preview dt
+
+        last = now;
+        now = SDL_GetPerformanceCounter();
+        dt = (float)(now - last) / (float)SDL_GetPerformanceFrequency();
+        printf("Preview render completed. Time taken: %fms.\n", dt * 1000);
     }
 
     // Clean up memory
@@ -321,7 +395,8 @@ int main()
     // Quit SDL
 
     puts("Quitting...");
-    SDL_DestroyTexture(texture);
+    SDL_DestroyTexture(full_texture);
+    SDL_DestroyTexture(preview_texture);
     SDL_DestroyRenderer(renderer);
     SDL_DestroyWindow(window);
     SDL_Quit();
