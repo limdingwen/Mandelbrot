@@ -17,6 +17,7 @@
 #define PREVIEW_WIDTH 240
 #define PREVIEW_HEIGHT 160
 #define PREVIEW_X_SIZE 30
+#define SHOW_PREVIEW_WHEN_RENDERING 0
 
 struct thread_block
 {
@@ -212,6 +213,15 @@ int main()
         exit_code = EX_OSERR;
         goto cleanup;
     }
+    if (SHOW_PREVIEW_WHEN_RENDERING)
+    {
+        if (SDL_SetTextureBlendMode(full_texture, SDL_BLENDMODE_BLEND) == -1)
+        {
+            fputs("Blend blendmode not supported on this platform.", stderr);
+            fputs("Preview may not be shown during the render.", stderr);
+            fputs("You may wish to disable SHOW_PREVIEW_WHEN_RENDERING.", stderr);
+        }
+    }
     preview_texture = SDL_CreateTexture(renderer,
         SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_STREAMING, PREVIEW_WIDTH, PREVIEW_HEIGHT);
     if (preview_texture == NULL)
@@ -341,6 +351,15 @@ int main()
 
                         memcpy(pixels, stored_pixels, PIXELS_SIZE);
                         SDL_UnlockTexture(full_texture);
+                        if (SHOW_PREVIEW_WHEN_RENDERING)
+                        {
+                            if (SDL_RenderCopy(renderer, preview_texture, NULL, NULL) < 0)
+                            {
+                                fprintf(stderr, "Unable to copy preview texture: %s\n", SDL_GetError());
+                                exit_code = EX_OSERR;
+                                goto cleanup;
+                            }
+                        }
                         if (SDL_RenderCopy(renderer, full_texture, NULL, NULL) < 0)
                         {
                             fprintf(stderr, "Unable to copy full texture: %s\n", SDL_GetError());
