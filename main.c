@@ -110,17 +110,26 @@ struct color gradient_color(struct gradient gradient, int x)
 
 // BigFloat
 
+enum sign
+{
+    SIGN_NEG,
+    SIGN_ZERO,
+    SIGN_POS
+};
+
 struct fp4
 {
+    enum sign sign;
     uint64_t man[4];
 };
 
 struct fp8
 {
+    enum sign sign;
     uint64_t man[8];
 };
 
-struct fp4 fp_add_4(struct fp4 a, struct fp4 b)
+struct fp4 fp_uadd4(struct fp4 a, struct fp4 b)
 {
     struct fp4 c;
     asm("ADDS %3, %7, %11\n"
@@ -146,7 +155,7 @@ struct fp4 fp_add_4(struct fp4 a, struct fp4 b)
     return c;
 }
 
-struct fp8 fp_add_8(struct fp8 a, struct fp8 b)
+struct fp8 fp_uadd8(struct fp8 a, struct fp8 b)
 {
     struct fp8 c;
     asm("ADDS %7, %15, %23\n"
@@ -188,8 +197,19 @@ struct fp8 fp_add_8(struct fp8 a, struct fp8 b)
     return c;
 }
 
-struct fp8 fp_mul_4(struct fp4 a, struct fp4 b)
+struct fp4 fp_smul4(struct fp4 a, struct fp4 b)
 {
+    if (a.sign == SIGN_ZERO || b.sign == SIGN_ZERO)
+        return (struct fp4) { SIGN_ZERO, {0} };
+
+    enum sign sign;
+    if (a.sign == SIGN_NEG && b.sign == SIGN_NEG)
+        sign = SIGN_POS;
+    else if (a.sign == SIGN_NEG || b.sign == SIGN_NEG)
+        sign = SIGN_NEG;
+    else
+        sign = SIGN_POS;
+
     struct fp8 c = {0};
     for (int i = 3; i >= 0; i--) // a
     {
@@ -199,15 +219,24 @@ struct fp8 fp_mul_4(struct fp4 a, struct fp4 b)
             assert(low_offset >= 1);
             int high_offset = low_offset - 1;
 
-            struct fp8 temp = {0};
             __uint128_t mult = (__uint128_t)a.man[i] * (__uint128_t)b.man[j];
+            struct fp8 temp = {0};
             temp.man[low_offset] = (uint64_t)mult;
             temp.man[high_offset] = mult >> 64;
 
-            c = fp_add_8(c, temp);
+            for (int k = 0; k < 8; k++)
+                printf("%llx ", temp.man[k]);
+            puts("");
+
+            c = fp_uadd8(c, temp);
         }
     }
-    return c;
+
+    struct fp4 c4;
+    c4.sign = sign;
+    memcpy(c4.man, c.man + 1, 4 * sizeof(uint64_t));
+
+    return c4;
 }
 
 // Complex
@@ -323,15 +352,12 @@ int main()
 {
     // Test bigfloat
 
-    //struct fp4 a = {{ 2, 0xC000000000000000, 0, 0 }};
-    //struct fp4 b = {{ 2, 0xD000000000000000, 0, 0 }};
-    struct fp4 a = {{ 0, 0, 0x1a8, 0xb99b337fae901b4d }};
-    struct fp4 b = {{ 0, 0, 0x264b7, 0x73d94f6496d30960 }};
-    //struct fp4 a = {{ 0, 0, 0, 0x0000283473847890 }};
-    //struct fp4 b = {{ 0, 0, 0, 0x7489170000000000 }};
-    struct fp8 c = fp_mul_4(a, b);
+    struct fp4 a = { SIGN_NEG, { 2, 0xC000000000000000, 0, 0 } };
+    struct fp4 b = { SIGN_POS, { 5, 0x2000000000000000, 0, 0 } };
+    struct fp4 c = fp_smul4(a, b);
     printf("c = ");
-    for (int i = 0; i < 8; i++)
+    if (c.sign == SIGN_NEG) printf("- ");
+    for (int i = 0; i < 4; i++)
         printf("%llx ", c.man[i]);
     puts("");
 
