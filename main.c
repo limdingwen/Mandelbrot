@@ -7,6 +7,7 @@
 
 // Config
 
+#define MAX_TITLE_LENGTH 128 
 #define WINDOW_WIDTH 900
 #define WINDOW_HEIGHT 600
 #define PIXELS_SIZE (WINDOW_WIDTH * WINDOW_HEIGHT * 4)
@@ -43,8 +44,8 @@ struct thread_block thread_blocks[THREADS] = {
 #define MAX_ITERATIONS 256
 #define MAX_COLOR_ITERATIONS MAX_ITERATIONS
 
-#define INITIAL_CENTER_X -0.74529f
-#define INITIAL_CENTER_Y 0.113075f
+#define INITIAL_CENTER_X -0.5f
+#define INITIAL_CENTER_Y 0
 #define INITIAL_SIZE 2
 #define SIZE_RATIO_X 1.5f
 #define SIZE_RATIO_Y 1
@@ -83,8 +84,8 @@ struct color color_lerp(struct color a, struct color b, float x)
 
 struct complex
 {
-    float x;
-    float y;
+    double x;
+    double y;
 };
 
 struct complex complex_add(struct complex a, struct complex b)
@@ -102,7 +103,7 @@ struct complex complex_sqr(struct complex a)
     return complex_mul(a, a);
 }
 
-float complex_sqrmag(struct complex a)
+double complex_sqrmag(struct complex a)
 {
     return a.x*a.x + a.y*a.y;
 }
@@ -123,19 +124,19 @@ struct thread_data
     int y_end;
     int width;
     int height;
-    float size;
-    float center_x;
-    float center_y;
+    double size;
+    double center_x;
+    double center_y;
     uint8_t *pixels;
 };
 
-float calculateMathPos(int screenPos, int screenWidth, float size, float center)
+double calculateMathPos(int screenPos, int screenWidth, double size, double center)
 {
-    float offset = center - size/2;
-    return (float)screenPos/(float)screenWidth*size + offset;
+    double offset = center - size/2;
+    return (double)screenPos/(double)screenWidth*size + offset;
 }
 
-struct mb_result process_mandelbrot(float math_x, float math_y)
+struct mb_result process_mandelbrot(double math_x, double math_y)
 {
     struct complex c = { math_x, math_y };
     struct complex z = { 0, 0 };
@@ -154,11 +155,11 @@ void *thread(void *arg)
 
     for (int screen_x = data->x_start; screen_x <= data->x_end; screen_x++)
     {
-        float math_x = calculateMathPos(screen_x, data->width, data->size*SIZE_RATIO_X, data->center_x);
+        double math_x = calculateMathPos(screen_x, data->width, data->size*SIZE_RATIO_X, data->center_x);
 
         for (int screen_y = data->y_start; screen_y <= data->y_end; screen_y++)
         {
-            float math_y = calculateMathPos(data->height - screen_y, data->height, data->size*SIZE_RATIO_Y, data->center_y);
+            double math_y = calculateMathPos(data->height - screen_y, data->height, data->size*SIZE_RATIO_Y, data->center_y);
             struct mb_result result = process_mandelbrot(math_x, math_y);
 
             struct color color;
@@ -234,9 +235,9 @@ int main()
 
     // Main loop
 
-    float size = INITIAL_SIZE;
-    float center_x = INITIAL_CENTER_X;
-    float center_y = INITIAL_CENTER_Y;
+    double size = INITIAL_SIZE;
+    double center_x = INITIAL_CENTER_X;
+    double center_y = INITIAL_CENTER_Y;
 
     stored_pixels = calloc(1, PIXELS_SIZE * sizeof(uint8_t));
     if (stored_pixels == NULL)
@@ -288,6 +289,10 @@ int main()
                 break;
             }
         }
+
+        char title_str[MAX_TITLE_LENGTH];
+        snprintf(title_str, MAX_TITLE_LENGTH, "X: %.17g, Y: %.17g, Size: %.17g", center_x, center_y, size);
+        SDL_SetWindowTitle(window, title_str);
 
         switch (state)
         {
@@ -471,8 +476,8 @@ int main()
     // Quit SDL
 
     puts("Quitting...");
-    SDL_DestroyTexture(full_texture);
     SDL_DestroyTexture(preview_texture);
+    SDL_DestroyTexture(full_texture);
     SDL_DestroyRenderer(renderer);
     SDL_DestroyWindow(window);
     SDL_Quit();
