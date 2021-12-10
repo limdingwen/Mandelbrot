@@ -5,6 +5,7 @@
 #include <pthread.h>
 #include <sysexits.h>
 #include <math.h>
+#include <assert.h>
 
 #define MAX_TITLE_LENGTH 256 
 #define WINDOW_WIDTH 900
@@ -104,6 +105,40 @@ struct color gradient_color(struct gradient gradient, int x)
     int stop_next = stop_prev + 1;
     float stop_x = (float)x / (float)gradient.size * (float)gradient.stop_count - (float)stop_prev;
     return color_lerp(gradient.stops[stop_prev], gradient.stops[stop_next], stop_x);
+}
+
+// BigFloat
+
+#define TEST_MAN_LEN 4
+
+struct fp
+{
+    uint64_t man[TEST_MAN_LEN];
+};
+
+struct fp fp_add(struct fp a, struct fp b)
+{
+    struct fp c;
+    asm("ADDS %3, %7, %11\n"
+        "ADCS %2, %6, %10\n"
+        "ADCS %1, %5, %9\n"
+        "ADCS %0, %4, %8"
+        :
+        "=&r"(c.man[0]), // 0
+        "=&r"(c.man[1]), // 1
+        "=&r"(c.man[2]), // 2
+        "=&r"(c.man[3])  // 3
+        :
+        "r"(a.man[0]),   // 4
+        "r"(a.man[1]),   // 5
+        "r"(a.man[2]),   // 6
+        "r"(a.man[3]),   // 7
+        "r"(b.man[0]),   // 8
+        "r"(b.man[1]),   // 9
+        "r"(b.man[2]),   // 10
+        "r"(b.man[3])    // 11
+        : ); // TODO: Clobber status register?
+    return c;
 }
 
 // Complex
@@ -217,6 +252,19 @@ void *thread(void *arg)
 
 int main()
 {
+    // Test bigfloat
+
+    struct fp a = {{ 2, 0xC000000000000000, 0, 0 }};
+    struct fp b = {{ 2, 0xD000000000000000, 0, 0 }};
+    struct fp c = fp_add(a, b);
+    printf("c = ");
+    for (int i = 0; i < TEST_MAN_LEN; i++)
+        printf("%llx ", c.man[i]);
+    puts("");
+
+    return 0;
+
+/*
     int err;
     int exit_code = EX_OK;
 
@@ -514,4 +562,5 @@ int main()
     SDL_Quit();
 
     return exit_code;
+*/
 }
