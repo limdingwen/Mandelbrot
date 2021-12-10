@@ -4,10 +4,9 @@
 #include <stdbool.h>
 #include <pthread.h>
 #include <sysexits.h>
+#include <math.h>
 
-// Config
-
-#define MAX_TITLE_LENGTH 128 
+#define MAX_TITLE_LENGTH 256 
 #define WINDOW_WIDTH 900
 #define WINDOW_HEIGHT 600
 #define PIXELS_SIZE (WINDOW_WIDTH * WINDOW_HEIGHT * 4)
@@ -18,7 +17,7 @@
 #define PREVIEW_WIDTH 240
 #define PREVIEW_HEIGHT 160
 #define PREVIEW_X_SIZE 30
-#define SHOW_PREVIEW_WHEN_RENDERING 0
+#define SHOW_PREVIEW_WHEN_RENDERING 1
 
 struct thread_block
 {
@@ -28,7 +27,8 @@ struct thread_block
     int y_end;
 };
 
-struct thread_block thread_blocks[THREADS] = {
+const struct thread_block thread_blocks[THREADS] =
+{
     { 0, 224, 0, 299 },
     { 225, 449, 0, 299 },
     { 450, 674, 0, 299 },
@@ -39,10 +39,27 @@ struct thread_block thread_blocks[THREADS] = {
     { 675, 899, 300, 599 },
 };
 
-#define INNER_COLOR (struct color){ 255, 255, 0 }
-#define OUTER_COLOR (struct color){ 0, 0, 255 }
-#define MAX_ITERATIONS 256
-#define MAX_COLOR_ITERATIONS MAX_ITERATIONS
+#define GRADIENT_STOP_COUNT 4
+#define GRADIENT_ITERATION_SIZE 64 // Use 2^x for best performance
+
+struct color
+{
+    float r;
+    float g;
+    float b;
+};
+
+const struct color gradient_stops[GRADIENT_STOP_COUNT + 1] =
+{
+    { 0, 0, 255 },
+    { 255, 255, 0 },
+    { 0, 255, 0 },
+    { 255, 0, 0 },
+    { 0, 0, 255 }, // For looping
+};
+
+#define ITERATIONS_M 2
+#define ITERATIONS_C 16
 
 #define INITIAL_CENTER_X -0.5f
 #define INITIAL_CENTER_Y 0
@@ -61,13 +78,6 @@ enum state
 
 // Color
 
-struct color
-{
-    float r;
-    float g;
-    float b;
-};
-
 struct color color_lerp(struct color a, struct color b, float x)
 {
     if (x > 1) x = 1;
@@ -78,6 +88,22 @@ struct color color_lerp(struct color a, struct color b, float x)
         a.g + (b.g - a.g)*x,
         a.b + (b.b - a.b)*x
     };
+}
+
+struct gradient
+{
+    int stop_count;
+    int size;
+    const struct color *stops;
+};
+
+struct color gradient_color(struct gradient gradient, int x)
+{
+    x %= gradient.size;
+    int stop_prev = (int)((float)x / (float)gradient.size * (float)gradient.stop_count);
+    int stop_next = stop_prev + 1;
+    float stop_x = (float)x / (float)gradient.size * (float)gradient.stop_count - (float)stop_prev;
+    return color_lerp(gradient.stops[stop_prev], gradient.stops[stop_next], stop_x);
 }
 
 // Complex
@@ -127,6 +153,7 @@ struct thread_data
     double size;
     double center_x;
     double center_y;
+    int iterations;
     uint8_t *pixels;
 };
 
@@ -136,11 +163,11 @@ double calculateMathPos(int screenPos, int screenWidth, double size, double cent
     return (double)screenPos/(double)screenWidth*size + offset;
 }
 
-struct mb_result process_mandelbrot(double math_x, double math_y)
+struct mb_result process_mandelbrot(double math_x, double math_y, int iterations)
 {
     struct complex c = { math_x, math_y };
     struct complex z = { 0, 0 };
-    for (int i = 0; i < MAX_ITERATIONS; i++)
+    for (int i = 0; i < iterations; i++)
     {
         z = complex_add(complex_sqr(z), c);
         if (complex_sqrmag(z) > 4) // sqr(2), where 2 is "radius of escape"
@@ -160,14 +187,22 @@ void *thread(void *arg)
         for (int screen_y = data->y_start; screen_y <= data->y_end; screen_y++)
         {
             double math_y = calculateMathPos(data->height - screen_y, data->height, data->size*SIZE_RATIO_Y, data->center_y);
-            struct mb_result result = process_mandelbrot(math_x, math_y);
+            struct mb_result result = process_mandelbrot(math_x, math_y, data->iterations);
 
             struct color color;
             if (result.is_in_set)
                 color = (struct color){ 0, 0, 0 };
             else
-                color = color_lerp(OUTER_COLOR, INNER_COLOR,
-                    (float)result.escape_iterations / MAX_COLOR_ITERATIONS);
+            {
+                const static struct gradient gradient =
+                {
+                    GRADIENT_STOP_COUNT,
+                    GRADIENT_ITERATION_SIZE,
+                    gradient_stops
+                };
+
+                color = gradient_color(gradient, result.escape_iterations);
+            }
             
             int r_offset = (screen_y*data->width + screen_x)*4;
             data->pixels[r_offset + 0] = (uint8_t) color.r;
@@ -179,8 +214,6 @@ void *thread(void *arg)
 
     pthread_exit(NULL);
 }
-
-// Main
 
 int main()
 {
@@ -258,8 +291,6 @@ int main()
 
     while (running)
     {
-        // Handle events
-
         SDL_Event event;
         while (SDL_PollEvent(&event))
         {
@@ -290,8 +321,13 @@ int main()
             }
         }
 
+        double iterations_x = -log10(size);
+        if (iterations_x < 0) iterations_x = 0;
+        double iterations_graph = ITERATIONS_M * iterations_x + ITERATIONS_C;
+        int iterations = (int)(iterations_graph * iterations_graph);
+
         char title_str[MAX_TITLE_LENGTH];
-        snprintf(title_str, MAX_TITLE_LENGTH, "X: %.17g, Y: %.17g, Size: %.17g", center_x, center_y, size);
+        snprintf(title_str, MAX_TITLE_LENGTH, "X: %.17g, Y: %.17g, Size: %.17g, Iterations: %d", center_x, center_y, size, iterations);
         SDL_SetWindowTitle(window, title_str);
 
         switch (state)
@@ -332,6 +368,7 @@ int main()
                                 size,
                                 center_x,
                                 center_y,
+                                iterations,
                                 stored_pixels
                             };
                             err = pthread_create(&thread_ids[i], NULL, thread, &thread_datas[i]);
@@ -391,8 +428,6 @@ int main()
 
             case STATE_PREVIEW:
             {
-                // Handle input
-
                 if (keys[SDL_SCANCODE_W]) center_y += size * PAN_SPEED * dt;
                 if (keys[SDL_SCANCODE_A]) center_x -= size * PAN_SPEED * dt;
                 if (keys[SDL_SCANCODE_S]) center_y -= size * PAN_SPEED * dt;
@@ -426,6 +461,7 @@ int main()
                         size,
                         center_x,
                         center_y,
+                        iterations,
                         pixels
                     };
                     err = pthread_create(&thread_ids[i], NULL, thread, &thread_datas[i]);
@@ -468,14 +504,9 @@ int main()
         }
     }
 
-    // Clean up memory
-
     cleanup:
-    free(stored_pixels);
-
-    // Quit SDL
-
     puts("Quitting...");
+    free(stored_pixels);
     SDL_DestroyTexture(preview_texture);
     SDL_DestroyTexture(full_texture);
     SDL_DestroyRenderer(renderer);
