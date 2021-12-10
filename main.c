@@ -26,7 +26,7 @@ struct thread_block
     int y_end;
 };
 
-struct thread_block full_thread_blocks[THREADS] = {
+struct thread_block thread_blocks[THREADS] = {
     { 0, 224, 0, 299 },
     { 225, 449, 0, 299 },
     { 450, 674, 0, 299 },
@@ -36,18 +36,6 @@ struct thread_block full_thread_blocks[THREADS] = {
     { 450, 674, 300, 599 },
     { 675, 899, 300, 599 },
 };
-
-/*
-struct thread_block preview_thread_blocks[THREADS] = {
-    { 0, 44, 0, 59 },
-    { 45, 89, 0, 59 },
-    { 90, 134, 0, 59 },
-    { 135, 179, 0, 59 },
-    { 0, 44, 60, 119 },
-    { 45, 89, 60, 119 },
-    { 90, 134, 60, 119 },
-    { 135, 179, 60, 119 },
-};*/
 
 #define INNER_COLOR (struct color){ 255, 255, 0 }
 #define OUTER_COLOR (struct color){ 0, 0, 255 }
@@ -62,6 +50,12 @@ struct thread_block preview_thread_blocks[THREADS] = {
 
 #define PAN_SPEED 1
 #define ZOOM_SPEED 1
+
+enum state
+{
+    STATE_PREVIEW,
+    STATE_FULL
+};
 
 // Color
 
@@ -247,7 +241,10 @@ int main()
     uint64_t now = SDL_GetPerformanceCounter();
     uint64_t last = 0;
     float dt = 0;
-    //bool haveToRender = true;
+
+    enum state state = STATE_PREVIEW;
+    bool haveToRenderFull = false;
+
     while (running)
     {
         // Handle events
@@ -258,26 +255,135 @@ int main()
             switch (event.type)
             {
                 case SDL_QUIT:
+                {
                     running = false;
-                    break;
+                }
+                break;
+                
+                case SDL_KEYDOWN:
+                {
+                    if (event.key.keysym.scancode == SDL_SCANCODE_TAB)
+                    {
+                        state = (state == STATE_FULL) ? STATE_PREVIEW : STATE_FULL;
+                    
+                        // State init logic
+
+                        if (state == STATE_FULL)
+                        {
+                            haveToRenderFull = true;
+                            memset(stored_pixels, 0, PIXELS_SIZE);
+                        }
+                    }
+                }
+                break;
             }
         }
 
-        // Render mandelbrot
-
-/*
-        if (haveToRender)
+        switch (state)
         {
-            haveToRender = false;
-            uint64_t begin_time = SDL_GetPerformanceCounter();
-            
-            for (int x = 0; x < THREAD_X_SIZE; x += SHOW_X_INTERVAL)
+            case STATE_FULL:
             {
+                // Render mandelbrot
+
+                if (haveToRenderFull)
+                {
+                    haveToRenderFull = false;
+                    uint64_t begin_time = SDL_GetPerformanceCounter();
+                    
+                    for (int x = 0; x < THREAD_X_SIZE; x += SHOW_X_INTERVAL)
+                    {
+                        uint8_t *pixels;
+                        int pitch;
+                        if (SDL_LockTexture(full_texture, NULL, (void**)&pixels, &pitch) < 0)
+                        {
+                            fprintf(stderr, "Unable to lock full texture: %s\n", SDL_GetError());
+                            exit_code = EX_OSERR;
+                            goto cleanup;
+                        }
+
+                        pthread_t thread_ids[THREADS];
+                        struct thread_data thread_datas[THREADS];
+                        for (int i = 0; i < THREADS; i++)
+                        {
+                            // Quick hack for "bottom blocks reverse X" effect
+                            int visual_x = (i < 4) ? x : (THREAD_X_SIZE - x - SHOW_X_INTERVAL);
+                            thread_datas[i] = (struct thread_data){
+                                thread_blocks[i].x_start + visual_x,
+                                thread_blocks[i].x_start + visual_x + SHOW_X_INTERVAL - 1,
+                                thread_blocks[i].y_start,
+                                thread_blocks[i].y_end,
+                                WINDOW_WIDTH,
+                                WINDOW_HEIGHT,
+                                size,
+                                center_x,
+                                center_y,
+                                stored_pixels
+                            };
+                            err = pthread_create(&thread_ids[i], NULL, thread, &thread_datas[i]);
+                            if (err != 0)
+                            {
+                                fprintf(stderr, "Unable to create thread: Error code %d\n", err);
+                                exit_code = EX_OSERR;
+                                goto cleanup;
+                            }
+                        }
+
+                        for (int i = 0; i < THREADS; i++)
+                        {
+                            err = pthread_join(thread_ids[i], NULL);
+                            if (err != 0)
+                            {
+                                fprintf(stderr, "Unable to join thread: Error code %d\n", err);
+                                exit_code = EX_OSERR;
+                                goto cleanup;
+                            }
+                        }
+
+                        memcpy(pixels, stored_pixels, PIXELS_SIZE);
+                        SDL_UnlockTexture(full_texture);
+                        if (SDL_RenderCopy(renderer, full_texture, NULL, NULL) < 0)
+                        {
+                            fprintf(stderr, "Unable to copy full texture: %s\n", SDL_GetError());
+                            exit_code = EX_OSERR;
+                            goto cleanup;
+                        }
+                        SDL_RenderPresent(renderer);
+                    }
+
+                    uint64_t end_time = SDL_GetPerformanceCounter();
+                    float time_taken = (float)(end_time - begin_time) / (float)SDL_GetPerformanceFrequency() * 1000;
+                    printf("Full render completed. Time taken: %fms.\n", time_taken);
+                }
+
+                if (SDL_RenderCopy(renderer, full_texture, NULL, NULL) < 0)
+                {
+                    fprintf(stderr, "Unable to copy full texture: %s\n", SDL_GetError());
+                    exit_code = EX_OSERR;
+                    goto cleanup;
+                }
+                SDL_RenderPresent(renderer);
+            }
+            break;
+
+            case STATE_PREVIEW:
+            {
+                // Handle input
+
+                if (keys[SDL_SCANCODE_W]) center_y += size * PAN_SPEED * dt;
+                if (keys[SDL_SCANCODE_A]) center_x -= size * PAN_SPEED * dt;
+                if (keys[SDL_SCANCODE_S]) center_y -= size * PAN_SPEED * dt;
+                if (keys[SDL_SCANCODE_D]) center_x += size * PAN_SPEED * dt;
+                if (keys[SDL_SCANCODE_R]) size -= size * ZOOM_SPEED * dt;
+                if (keys[SDL_SCANCODE_F]) size += size * ZOOM_SPEED * dt;
+
+                // Render mandelbrot
+                // TODO: Only render when needed
+
                 uint8_t *pixels;
                 int pitch;
-                if (SDL_LockTexture(full_texture, NULL, (void**)&pixels, &pitch) < 0)
+                if (SDL_LockTexture(preview_texture, NULL, (void**)&pixels, &pitch) < 0)
                 {
-                    fprintf(stderr, "Unable to lock texture: %s\n", SDL_GetError());
+                    fprintf(stderr, "Unable to lock preview texture: %s\n", SDL_GetError());
                     exit_code = EX_OSERR;
                     goto cleanup;
                 }
@@ -286,16 +392,17 @@ int main()
                 struct thread_data thread_datas[THREADS];
                 for (int i = 0; i < THREADS; i++)
                 {
-                    // Quick hack for "bottom blocks reverse X" effect
-                    int visual_x = (i < 4) ? x : (THREAD_X_SIZE - x - SHOW_X_INTERVAL);
                     thread_datas[i] = (struct thread_data){
-                        thread_blocks[i].x_start + visual_x,
-                        thread_blocks[i].x_start + visual_x + SHOW_X_INTERVAL - 1,
-                        thread_blocks[i].y_start,
-                        thread_blocks[i].y_end,
+                        PREVIEW_X_SIZE * i,
+                        PREVIEW_X_SIZE * (i + 1) - 1,
+                        0,
+                        PREVIEW_HEIGHT,
+                        PREVIEW_WIDTH,
+                        PREVIEW_HEIGHT,
                         size,
                         center_x,
-                        center_y
+                        center_y,
+                        pixels
                     };
                     err = pthread_create(&thread_ids[i], NULL, thread, &thread_datas[i]);
                     if (err != 0)
@@ -317,104 +424,23 @@ int main()
                     }
                 }
 
-                memcpy(pixels, stored_pixels, PIXELS_SIZE);
-                SDL_UnlockTexture(full_texture);
-                if (SDL_RenderCopy(renderer, full_texture, NULL, NULL) < 0)
+                SDL_UnlockTexture(preview_texture);
+                if (SDL_RenderCopy(renderer, preview_texture, NULL, NULL) < 0)
                 {
-                    fprintf(stderr, "Unable to copy texture: %s\n", SDL_GetError());
+                    fprintf(stderr, "Unable to copy preview texture: %s\n", SDL_GetError());
                     exit_code = EX_OSERR;
                     goto cleanup;
                 }
                 SDL_RenderPresent(renderer);
+
+                // Calculate dt
+
+                last = now;
+                now = SDL_GetPerformanceCounter();
+                dt = (float)(now - last) / (float)SDL_GetPerformanceFrequency();
+                printf("Preview render completed. Time taken: %fms.\n", dt * 1000);
             }
-
-            uint64_t end_time = SDL_GetPerformanceCounter();
-            float time_taken = (float)(end_time - begin_time) / (float)SDL_GetPerformanceFrequency() * 1000;
-            printf("Full render completed. Time taken: %fms.\n", time_taken);
-        }
-
-        if (SDL_RenderCopy(renderer, full_texture, NULL, NULL) < 0)
-        {
-            fprintf(stderr, "Unable to copy texture: %s\n", SDL_GetError());
-            exit_code = EX_OSERR;
-            goto cleanup;
-        }
-        SDL_RenderPresent(renderer);
-*/
-
-        {
-            // Handle preview input
-
-            if (keys[SDL_SCANCODE_W]) center_y += size * PAN_SPEED * dt;
-            if (keys[SDL_SCANCODE_A]) center_x -= size * PAN_SPEED * dt;
-            if (keys[SDL_SCANCODE_S]) center_y -= size * PAN_SPEED * dt;
-            if (keys[SDL_SCANCODE_D]) center_x += size * PAN_SPEED * dt;
-            if (keys[SDL_SCANCODE_R]) size -= size * ZOOM_SPEED * dt;
-            if (keys[SDL_SCANCODE_F]) size += size * ZOOM_SPEED * dt;
-
-            // Render preview mandelbrot
-            // TODO: Only render when needed
-
-            uint8_t *pixels;
-            int pitch;
-            if (SDL_LockTexture(preview_texture, NULL, (void**)&pixels, &pitch) < 0)
-            {
-                fprintf(stderr, "Unable to lock preview texture: %s\n", SDL_GetError());
-                exit_code = EX_OSERR;
-                goto cleanup;
-            }
-
-            pthread_t thread_ids[THREADS];
-            struct thread_data thread_datas[THREADS];
-            for (int i = 0; i < THREADS; i++)
-            {
-                thread_datas[i] = (struct thread_data){
-                    PREVIEW_X_SIZE * i,
-                    PREVIEW_X_SIZE * (i + 1) - 1,
-                    0,
-                    PREVIEW_HEIGHT,
-                    PREVIEW_WIDTH,
-                    PREVIEW_HEIGHT,
-                    size,
-                    center_x,
-                    center_y,
-                    pixels
-                };
-                err = pthread_create(&thread_ids[i], NULL, thread, &thread_datas[i]);
-                if (err != 0)
-                {
-                    fprintf(stderr, "Unable to create thread: Error code %d\n", err);
-                    exit_code = EX_OSERR;
-                    goto cleanup;
-                }
-            }
-
-            for (int i = 0; i < THREADS; i++)
-            {
-                err = pthread_join(thread_ids[i], NULL);
-                if (err != 0)
-                {
-                    fprintf(stderr, "Unable to join thread: Error code %d\n", err);
-                    exit_code = EX_OSERR;
-                    goto cleanup;
-                }
-            }
-
-            SDL_UnlockTexture(preview_texture);
-            if (SDL_RenderCopy(renderer, preview_texture, NULL, NULL) < 0)
-            {
-                fprintf(stderr, "Unable to copy preview texture: %s\n", SDL_GetError());
-                exit_code = EX_OSERR;
-                goto cleanup;
-            }
-            SDL_RenderPresent(renderer);
-
-            // Preview dt
-
-            last = now;
-            now = SDL_GetPerformanceCounter();
-            dt = (float)(now - last) / (float)SDL_GetPerformanceFrequency();
-            printf("Preview render completed. Time taken: %fms.\n", dt * 1000);
+            break;
         }
     }
 
