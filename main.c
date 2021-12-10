@@ -1,6 +1,7 @@
 #include <SDL2/SDL.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <stdbool.h>
 #include <pthread.h>
 #include <sysexits.h>
@@ -109,16 +110,19 @@ struct color gradient_color(struct gradient gradient, int x)
 
 // BigFloat
 
-#define TEST_MAN_LEN 4
-
-struct fp
+struct fp4
 {
-    uint64_t man[TEST_MAN_LEN];
+    uint64_t man[4];
 };
 
-struct fp fp_add(struct fp a, struct fp b)
+struct fp8
 {
-    struct fp c;
+    uint64_t man[8];
+};
+
+struct fp4 fp_add_4(struct fp4 a, struct fp4 b)
+{
+    struct fp4 c;
     asm("ADDS %3, %7, %11\n"
         "ADCS %2, %6, %10\n"
         "ADCS %1, %5, %9\n"
@@ -129,15 +133,80 @@ struct fp fp_add(struct fp a, struct fp b)
         "=&r"(c.man[2]), // 2
         "=&r"(c.man[3])  // 3
         :
-        "r"(a.man[0]),   // 4
-        "r"(a.man[1]),   // 5
-        "r"(a.man[2]),   // 6
-        "r"(a.man[3]),   // 7
-        "r"(b.man[0]),   // 8
-        "r"(b.man[1]),   // 9
-        "r"(b.man[2]),   // 10
-        "r"(b.man[3])    // 11
-        : ); // TODO: Clobber status register?
+        "r"  (a.man[0]), // 4
+        "r"  (a.man[1]), // 5
+        "r"  (a.man[2]), // 6
+        "r"  (a.man[3]), // 7
+        "r"  (b.man[0]), // 8
+        "r"  (b.man[1]), // 9
+        "r"  (b.man[2]), // 10
+        "r"  (b.man[3])  // 11
+        :
+        "cc");
+    return c;
+}
+
+struct fp8 fp_add_8(struct fp8 a, struct fp8 b)
+{
+    struct fp8 c;
+    asm("ADDS %7, %15, %23\n"
+        "ADCS %6, %14, %22\n"
+        "ADCS %5, %13, %21\n"
+        "ADCS %4, %12, %20\n"
+        "ADCS %3, %11, %19\n"
+        "ADCS %2, %10, %18\n"
+        "ADCS %1, %9, %17\n"
+        "ADCS %0, %8, %16"
+        :
+        "=&r"(c.man[0]), // 0
+        "=&r"(c.man[1]), // 1
+        "=&r"(c.man[2]), // 2
+        "=&r"(c.man[3]), // 3
+        "=&r"(c.man[4]), // 4
+        "=&r"(c.man[5]), // 5
+        "=&r"(c.man[6]), // 6
+        "=&r"(c.man[7])  // 7
+        :
+        "r"  (a.man[0]), // 8
+        "r"  (a.man[1]), // 9
+        "r"  (a.man[2]), // 10
+        "r"  (a.man[3]), // 11
+        "r"  (a.man[4]), // 12
+        "r"  (a.man[5]), // 13
+        "r"  (a.man[6]), // 14
+        "r"  (a.man[7]), // 15
+        "r"  (b.man[0]), // 16
+        "r"  (b.man[1]), // 17
+        "r"  (b.man[2]), // 18
+        "r"  (b.man[3]), // 19
+        "r"  (b.man[4]), // 20
+        "r"  (b.man[5]), // 21
+        "r"  (b.man[6]), // 22
+        "r"  (b.man[7])  // 23
+        :
+        "cc");
+    return c;
+}
+
+struct fp8 fp_mul_4(struct fp4 a, struct fp4 b)
+{
+    struct fp8 c = {0};
+    for (int i = 3; i >= 0; i--) // a
+    {
+        for (int j = 3; j >= 0; j--) // b
+        {
+            int low_offset = 7 - (3 - i) - (3 - j);
+            assert(low_offset >= 1);
+            int high_offset = low_offset - 1;
+
+            struct fp8 temp = {0};
+            __uint128_t mult = (__uint128_t)a.man[i] * (__uint128_t)b.man[j];
+            temp.man[low_offset] = (uint64_t)mult;
+            temp.man[high_offset] = mult >> 64;
+
+            c = fp_add_8(c, temp);
+        }
+    }
     return c;
 }
 
@@ -254,11 +323,15 @@ int main()
 {
     // Test bigfloat
 
-    struct fp a = {{ 2, 0xC000000000000000, 0, 0 }};
-    struct fp b = {{ 2, 0xD000000000000000, 0, 0 }};
-    struct fp c = fp_add(a, b);
+    //struct fp4 a = {{ 2, 0xC000000000000000, 0, 0 }};
+    //struct fp4 b = {{ 2, 0xD000000000000000, 0, 0 }};
+    struct fp4 a = {{ 0, 0, 0x1a8, 0xb99b337fae901b4d }};
+    struct fp4 b = {{ 0, 0, 0x264b7, 0x73d94f6496d30960 }};
+    //struct fp4 a = {{ 0, 0, 0, 0x0000283473847890 }};
+    //struct fp4 b = {{ 0, 0, 0, 0x7489170000000000 }};
+    struct fp8 c = fp_mul_4(a, b);
     printf("c = ");
-    for (int i = 0; i < TEST_MAN_LEN; i++)
+    for (int i = 0; i < 8; i++)
         printf("%llx ", c.man[i]);
     puts("");
 
