@@ -10,12 +10,13 @@
 #define WINDOW_WIDTH 900
 #define WINDOW_HEIGHT 600
 #define PIXELS_SIZE (WINDOW_WIDTH * WINDOW_HEIGHT * 4)
-#define PREVIEW_WIDTH 180
-#define PREVIEW_HEIGHT 120
-
 #define THREADS 8
 #define SHOW_X_INTERVAL 5
 #define THREAD_X_SIZE 225
+
+#define PREVIEW_WIDTH 240
+#define PREVIEW_HEIGHT 160
+#define PREVIEW_X_SIZE 30
 
 struct thread_block
 {
@@ -25,7 +26,7 @@ struct thread_block
     int y_end;
 };
 
-struct thread_block thread_blocks[THREADS] = {
+struct thread_block full_thread_blocks[THREADS] = {
     { 0, 224, 0, 299 },
     { 225, 449, 0, 299 },
     { 450, 674, 0, 299 },
@@ -35,6 +36,18 @@ struct thread_block thread_blocks[THREADS] = {
     { 450, 674, 300, 599 },
     { 675, 899, 300, 599 },
 };
+
+/*
+struct thread_block preview_thread_blocks[THREADS] = {
+    { 0, 44, 0, 59 },
+    { 45, 89, 0, 59 },
+    { 90, 134, 0, 59 },
+    { 135, 179, 0, 59 },
+    { 0, 44, 60, 119 },
+    { 45, 89, 60, 119 },
+    { 90, 134, 60, 119 },
+    { 135, 179, 60, 119 },
+};*/
 
 #define INNER_COLOR (struct color){ 255, 255, 0 }
 #define OUTER_COLOR (struct color){ 0, 0, 255 }
@@ -121,10 +134,10 @@ struct thread_data
     uint8_t *pixels;
 };
 
-float calculateMathPos(float screenPos, float screenWidth, float size, float center)
+float calculateMathPos(int screenPos, int screenWidth, float size, float center)
 {
     float offset = center - size/2;
-    return screenPos/screenWidth*size + offset;
+    return (float)screenPos/(float)screenWidth*size + offset;
 }
 
 struct mb_result process_mandelbrot(float math_x, float math_y)
@@ -146,13 +159,11 @@ void *thread(void *arg)
 
     for (int screen_x = data->x_start; screen_x <= data->x_end; screen_x++)
     {
-        float math_x = calculateMathPos((float)screen_x,
-            (float)data->width, data->size*SIZE_RATIO_X, data->center_x);
+        float math_x = calculateMathPos(screen_x, data->width, data->size*SIZE_RATIO_X, data->center_x);
 
         for (int screen_y = data->y_start; screen_y <= data->y_end; screen_y++)
         {
-            float math_y = calculateMathPos((float)data->height - (float)screen_y,
-                (float)data->height, data->size*SIZE_RATIO_Y, data->center_y);
+            float math_y = calculateMathPos(data->height - screen_y, data->height, data->size*SIZE_RATIO_Y, data->center_y);
             struct mb_result result = process_mandelbrot(math_x, math_y);
 
             struct color color;
@@ -170,16 +181,14 @@ void *thread(void *arg)
         }
     }
 
-    // TODO: Extract function to be reused as blocking?
-    //pthread_exit(NULL);
-    return NULL;
+    pthread_exit(NULL);
 }
 
 // Main
 
 int main()
 {
-    //int err;
+    int err;
     int exit_code = EX_OK;
 
     // Start SDL
@@ -333,19 +342,19 @@ int main()
         SDL_RenderPresent(renderer);
 */
 
-        // Handle preview input
-
-        if (keys[SDL_SCANCODE_W]) center_y += size * PAN_SPEED * dt;
-        if (keys[SDL_SCANCODE_A]) center_x -= size * PAN_SPEED * dt;
-        if (keys[SDL_SCANCODE_S]) center_y -= size * PAN_SPEED * dt;
-        if (keys[SDL_SCANCODE_D]) center_x += size * PAN_SPEED * dt;
-        if (keys[SDL_SCANCODE_R]) size -= size * ZOOM_SPEED * dt;
-        if (keys[SDL_SCANCODE_F]) size += size * ZOOM_SPEED * dt;
-
-        // Render preview mandelbrot
-        // TODO: Only render when needed
-
         {
+            // Handle preview input
+
+            if (keys[SDL_SCANCODE_W]) center_y += size * PAN_SPEED * dt;
+            if (keys[SDL_SCANCODE_A]) center_x -= size * PAN_SPEED * dt;
+            if (keys[SDL_SCANCODE_S]) center_y -= size * PAN_SPEED * dt;
+            if (keys[SDL_SCANCODE_D]) center_x += size * PAN_SPEED * dt;
+            if (keys[SDL_SCANCODE_R]) size -= size * ZOOM_SPEED * dt;
+            if (keys[SDL_SCANCODE_F]) size += size * ZOOM_SPEED * dt;
+
+            // Render preview mandelbrot
+            // TODO: Only render when needed
+
             uint8_t *pixels;
             int pitch;
             if (SDL_LockTexture(preview_texture, NULL, (void**)&pixels, &pitch) < 0)
@@ -355,19 +364,41 @@ int main()
                 goto cleanup;
             }
 
-            struct thread_data data = {
-                0,
-                PREVIEW_WIDTH - 1,
-                0,
-                PREVIEW_HEIGHT - 1,
-                PREVIEW_WIDTH,
-                PREVIEW_HEIGHT,
-                size,
-                center_x,
-                center_y,
-                pixels
-            };
-            thread(&data);
+            pthread_t thread_ids[THREADS];
+            struct thread_data thread_datas[THREADS];
+            for (int i = 0; i < THREADS; i++)
+            {
+                thread_datas[i] = (struct thread_data){
+                    PREVIEW_X_SIZE * i,
+                    PREVIEW_X_SIZE * (i + 1) - 1,
+                    0,
+                    PREVIEW_HEIGHT,
+                    PREVIEW_WIDTH,
+                    PREVIEW_HEIGHT,
+                    size,
+                    center_x,
+                    center_y,
+                    pixels
+                };
+                err = pthread_create(&thread_ids[i], NULL, thread, &thread_datas[i]);
+                if (err != 0)
+                {
+                    fprintf(stderr, "Unable to create thread: Error code %d\n", err);
+                    exit_code = EX_OSERR;
+                    goto cleanup;
+                }
+            }
+
+            for (int i = 0; i < THREADS; i++)
+            {
+                err = pthread_join(thread_ids[i], NULL);
+                if (err != 0)
+                {
+                    fprintf(stderr, "Unable to join thread: Error code %d\n", err);
+                    exit_code = EX_OSERR;
+                    goto cleanup;
+                }
+            }
 
             SDL_UnlockTexture(preview_texture);
             if (SDL_RenderCopy(renderer, preview_texture, NULL, NULL) < 0)
@@ -377,14 +408,14 @@ int main()
                 goto cleanup;
             }
             SDL_RenderPresent(renderer);
+
+            // Preview dt
+
+            last = now;
+            now = SDL_GetPerformanceCounter();
+            dt = (float)(now - last) / (float)SDL_GetPerformanceFrequency();
+            printf("Preview render completed. Time taken: %fms.\n", dt * 1000);
         }
-
-        // Preview dt
-
-        last = now;
-        now = SDL_GetPerformanceCounter();
-        dt = (float)(now - last) / (float)SDL_GetPerformanceFrequency();
-        printf("Preview render completed. Time taken: %fms.\n", dt * 1000);
     }
 
     // Clean up memory
