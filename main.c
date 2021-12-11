@@ -289,7 +289,7 @@ struct fp256 fp_sadd256(struct fp256 a, struct fp256 b)
 struct fp256 fp_sinv256(struct fp256 a)
 {
     if (a.sign == SIGN_POS) a.sign = SIGN_NEG;
-    if (a.sign == SIGN_NEG) a.sign = SIGN_POS;
+    else if (a.sign == SIGN_NEG) a.sign = SIGN_POS;
     return a;
 }
 
@@ -325,9 +325,9 @@ struct fp256 fp_smul256(struct fp256 a, struct fp256 b)
             temp.man[low_offset] = (uint64_t)mult;
             temp.man[high_offset] = mult >> 64;
 
-            /*for (int k = 0; k < 8; k++)
-                printf("%llx ", temp.man[k]);
-            puts("");*/
+            //for (int k = 0; k < 8; k++)
+            //    printf("%llx ", temp.man[k]);
+            //puts("");
 
             c = fp_uadd512(c, temp);
         }
@@ -413,7 +413,7 @@ struct complex
 
 struct complex complex_add(struct complex a, struct complex b)
 {
-    return (struct complex) { fp_sadd256(a.x, b.x), fp_sadd256(a.x, b.x) };
+    return (struct complex) { fp_sadd256(a.x, b.x), fp_sadd256(a.y, b.y) };
 }
 
 struct complex complex_mul(struct complex a, struct complex b)
@@ -524,14 +524,18 @@ int main()
 {
 /*
     // Test bigfloat
+    // add, sub, mul, sqr, asr, int
 
-    struct fp256 a = { SIGN_POS, { 4892, 123, 423, 4738 } };
-    struct fp256 c = fp_asr256(a);
+    struct fp256 a = { SIGN_POS, { 0, 0x926e978d4fdf3b64, 0x5a1cac083126e978, 0xd4fdf3b645a1cac0 } };
+    //struct fp256 b = { SIGN_NEG, { 1, 0x61cac083126e978d, 0x4fdf3b645a1cac08, 0x3126e978d4fdf3b6 } };
+    struct fp256 b = int_to_fp256(-43);
+    printf("b = ");
+    if (b.sign == SIGN_NEG) printf("-");
+    printf("%llx.%llx_%llx_%llx\n", b.man[0], b.man[1], b.man[2], b.man[3]);
+    struct fp256 c = fp_smul256(a, b);
     printf("c = ");
-    if (c.sign == SIGN_NEG) printf("- ");
-    for (int i = 0; i < 4; i++)
-        printf("%llu ", c.man[i]);
-    puts("");
+    if (c.sign == SIGN_NEG) printf("-");
+    printf("%llx.%llx_%llx_%llx\n", c.man[0], c.man[1], c.man[2], c.man[3]);
 
     return 0;
 */
@@ -586,7 +590,6 @@ int main()
     puts("Started.");
 
     // Main loop
-
     struct fp256 size = INITIAL_SIZE;
     struct fp256 center_x = INITIAL_CENTER_X;
     struct fp256 center_y = INITIAL_CENTER_Y;
@@ -606,7 +609,7 @@ int main()
     float dt = 0;
 
     enum state state = STATE_PREVIEW;
-    bool haveToRenderFull = false;
+    bool haveToRenderFull = true;
 
     while (running)
     {
