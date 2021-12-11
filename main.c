@@ -14,18 +14,22 @@
 #define WINDOW_WIDTH 900
 #define WINDOW_HEIGHT 600
 #define WINDOW_WIDTH_RECIPROCAL (struct fp256){ SIGN_POS,   { 0, 0x0048d159e26af37c, 0x048d159e26af37c0, 0x48d159e26af37c04 } }
-#define WINDOW_HEIGHT_RECIPROCAL  (struct fp256){ SIGN_POS, { 0, 0x006d3a06d3a06d3a, 0x06d3a06d3a06d3a0, 0x6d3a06d3a06d3a06 } }
-#define PIXELS_SIZE (WINDOW_WIDTH * WINDOW_HEIGHT * 4)
-#define THREADS 8
-#define SHOW_X_INTERVAL 5
-#define THREAD_X_SIZE 225
+#define WINDOW_HEIGHT_RECIPROCAL (struct fp256){ SIGN_POS,  { 0, 0x006d3a06d3a06d3a, 0x06d3a06d3a06d3a0, 0x6d3a06d3a06d3a06 } }
+#define FULL_PIXELS_SIZE (WINDOW_WIDTH * WINDOW_HEIGHT * 4)
+#define FULL_SHOW_X_INTERVAL 5
+#define FULL_THREAD_X_SIZE 225
 
 #define PREVIEW_WIDTH 240
 #define PREVIEW_HEIGHT 160
-#define PREVIEW_WIDTH_RECIPROCAL (struct fp256){ SIGN_POS,   { 0, 0x0111111111111111, 0x1111111111111111, 0x1111111111111111 } }
-#define PREVIEW_HEIGHT_RECIPROCAL  (struct fp256){ SIGN_POS, { 0, 0x0199999999999999, 0x9999999999999999, 0x9999999999999999 } }
-#define PREVIEW_X_SIZE 30
+#define PREVIEW_WIDTH_RECIPROCAL (struct fp256){ SIGN_POS,  { 0, 0x0111111111111111, 0x1111111111111111, 0x1111111111111111 } }
+#define PREVIEW_HEIGHT_RECIPROCAL (struct fp256){ SIGN_POS, { 0, 0x0199999999999999, 0x9999999999999999, 0x9999999999999999 } }
+#define PREVIEW_PIXELS_SIZE (PREVIEW_WIDTH * PREVIEW_HEIGHT * 4)
+#define PREVIEW_SHOW_X_INTERVAL 5
+#define PREVIEW_THREAD_X_SIZE 60
+
 #define SHOW_PREVIEW_WHEN_RENDERING 1
+
+#define THREADS 8
 
 struct thread_block
 {
@@ -35,7 +39,7 @@ struct thread_block
     int y_end;
 };
 
-const struct thread_block thread_blocks[THREADS] =
+const struct thread_block full_thread_blocks[THREADS] =
 {
     { 0, 224, 0, 299 },
     { 225, 449, 0, 299 },
@@ -45,6 +49,18 @@ const struct thread_block thread_blocks[THREADS] =
     { 225, 449, 300, 599 },
     { 450, 674, 300, 599 },
     { 675, 899, 300, 599 },
+};
+
+const struct thread_block preview_thread_blocks[THREADS] =
+{
+    { 0, 59, 0, 79 },
+    { 60, 119, 0, 79, },
+    { 120, 179, 0, 79 },
+    { 180, 239, 0, 79 },
+    { 0, 59, 80, 159 },
+    { 60, 119, 80, 159, },
+    { 120, 179, 80, 159 },
+    { 180, 239, 80, 159 },
 };
 
 #define GRADIENT_STOP_COUNT 4
@@ -414,20 +430,20 @@ struct fp256 calculateMathPos(int screen_pos, struct fp256 width_reciprocal, str
 struct mb_result
 {
     bool is_in_set;
-    int escape_iterations;
+    unsigned long long escape_iterations;
 };
 
-struct mb_result process_mandelbrot(struct fp256 math_x, struct fp256 math_y, int iterations)
+struct mb_result process_mandelbrot(struct fp256 math_x, struct fp256 math_y, unsigned long long iterations)
 {
     struct complex c = { math_x, math_y };
     struct complex z = { { SIGN_ZERO, {0} }, { SIGN_ZERO, {0} } };
-    for (int i = 0; i < iterations; i++)
+    for (unsigned long long i = 0; i < iterations; i++)
     {
         z = complex_add(complex_sqr(z), c);
         if (complex_sqrmag_whole(z) >= 4) // sqr(2), where 2 is "radius of escape"
             return (struct mb_result) { false, i };
     }
-    return (struct mb_result) { true, -1 };
+    return (struct mb_result) { true, -1ULL };
 }
 
 struct thread_data
@@ -443,7 +459,7 @@ struct thread_data
     struct fp256 size;
     struct fp256 center_x;
     struct fp256 center_y;
-    int iterations;
+    unsigned long long iterations;
     uint8_t *pixels;
 };
 
@@ -472,7 +488,7 @@ void *thread(void *arg)
                     GRADIENT_ITERATION_SIZE,
                     gradient_stops
                 };
-                color = gradient_color(gradient, result.escape_iterations);
+                color = gradient_color(gradient, (int)result.escape_iterations); // TODO: If got problems, make this unsigned long long
             }
             
             int r_offset = (screen_y*data->width + screen_x)*4;
@@ -493,7 +509,7 @@ int main()
 
     // Start SDL
 
-    uint8_t *stored_pixels = NULL;
+    uint8_t *full_stored_pixels = NULL, *preview_stored_pixels = NULL;
     SDL_Renderer *renderer = NULL;
     SDL_Window *window = NULL;
     SDL_Texture *full_texture = NULL, *preview_texture = NULL, *zoom_image = NULL;
@@ -559,11 +575,13 @@ int main()
     struct fp256 size = INITIAL_SIZE;
     struct fp256 center_x = INITIAL_CENTER_X;
     struct fp256 center_y = INITIAL_CENTER_Y;
+    unsigned long long iterations = 32;
 
-    stored_pixels = calloc(1, PIXELS_SIZE * sizeof(uint8_t));
-    if (stored_pixels == NULL)
+    full_stored_pixels = calloc(1, FULL_PIXELS_SIZE * sizeof(uint8_t));
+    preview_stored_pixels = calloc(1, PREVIEW_PIXELS_SIZE * sizeof(uint8_t));
+    if (full_stored_pixels == NULL || preview_stored_pixels == NULL)
     {
-        fputs("Unable to allocate memory for stored_pixels.", stderr);
+        fputs("Unable to allocate memory for storing pixels.", stderr);
         exit_code = EXIT_FAILURE;
         goto cleanup;
     }
@@ -592,17 +610,34 @@ int main()
                 
                 case SDL_KEYDOWN:
                 {
-                    if (event.key.keysym.scancode == SDL_SCANCODE_TAB)
+                    switch (event.key.keysym.scancode)
                     {
-                        state = (state == STATE_FULL) ? STATE_PREVIEW : STATE_FULL;
-                    
-                        // State init logic
+                        case SDL_SCANCODE_TAB:
+                        {
+                            state = (state == STATE_FULL) ? STATE_PREVIEW : STATE_FULL;
+                        
+                            // State init logic
 
-                        if (state == STATE_FULL)
+                            haveToRender = true;
+                            if (state == STATE_FULL)
+                                memset(full_stored_pixels, 0, FULL_PIXELS_SIZE);
+                            else if (state == STATE_PREVIEW)
+                                memset(preview_stored_pixels, 0, PREVIEW_PIXELS_SIZE);
+                        }
+                        break;
+
+                        case SDL_SCANCODE_H:
                         {
                             haveToRender = true;
-                            memset(stored_pixels, 0, PIXELS_SIZE);
+                            center_x = INITIAL_CENTER_X;
+                            center_y = INITIAL_CENTER_Y;
+                            size = INITIAL_SIZE;
+                            // Not doing memset is intended, for the visual effect.
                         }
+                        break;
+
+                        default:
+                        break;
                     }
                 }
                 break;
@@ -616,22 +651,25 @@ int main()
                         center_x = calculateMathPos(mouse_x, WINDOW_WIDTH_RECIPROCAL, size_x, center_x);
                         center_y = calculateMathPos(WINDOW_HEIGHT - mouse_y, WINDOW_HEIGHT_RECIPROCAL, size, center_y);
                         size = fp_smul256(size, ZOOM);
+                        iterations += 64; // TODO: Less hardcoded
+                        memset(full_stored_pixels, 0, FULL_PIXELS_SIZE);
+                        memset(preview_stored_pixels, 0, PREVIEW_PIXELS_SIZE);
                     }
                     else if (event.button.button == SDL_BUTTON_RIGHT)
                     {
                         haveToRender = true;
                         size = fp_smul256(size, ZOOM_RECIPROCAL);
+                        iterations -= 64;
+                        memset(full_stored_pixels, 0, FULL_PIXELS_SIZE);
+                        memset(preview_stored_pixels, 0, PREVIEW_PIXELS_SIZE);
                     }
                 }
                 break;
+
+                default:
+                break;
             }
         }
-
-        //double iterations_x = -log10(size);
-        //if (iterations_x < 0) iterations_x = 0;
-        //double iterations_graph = ITERATIONS_M * iterations_x + ITERATIONS_C;
-        //int iterations = (int)(iterations_graph * iterations_graph);
-        int iterations = 32;
 
         //char title_str[MAX_TITLE_LENGTH];
         //snprintf(title_str, MAX_TITLE_LENGTH, "X: %.17g, Y: %.17g, Size: %.17g, Iterations: %d", center_x, center_y, size, iterations);
@@ -643,14 +681,58 @@ int main()
         {
             haveToRender = false;
             uint64_t begin_time = SDL_GetPerformanceCounter();
+
+            int thread_x_size;
+            int show_x_interval;
+            SDL_Texture *texture;
+            const struct thread_block *thread_blocks;
+            int width;
+            int height;
+            struct fp256 width_reciprocal;
+            struct fp256 height_reciprocal;
+            uint8_t *stored_pixels;
+            int pixels_size;
+
+            if (state == STATE_PREVIEW)
+            {
+                thread_x_size =  PREVIEW_THREAD_X_SIZE;
+                show_x_interval = PREVIEW_SHOW_X_INTERVAL;
+                texture = preview_texture;
+                thread_blocks = preview_thread_blocks;
+                width = PREVIEW_WIDTH;
+                height = PREVIEW_HEIGHT;
+                width_reciprocal = PREVIEW_WIDTH_RECIPROCAL;
+                height_reciprocal = PREVIEW_HEIGHT_RECIPROCAL;
+                stored_pixels = preview_stored_pixels;
+                pixels_size = PREVIEW_PIXELS_SIZE;
+            }
+            else if (state == STATE_FULL)
+            {
+                thread_x_size =  FULL_THREAD_X_SIZE;
+                show_x_interval = FULL_SHOW_X_INTERVAL;
+                texture = full_texture;
+                thread_blocks = full_thread_blocks;
+                width = WINDOW_WIDTH;
+                height = WINDOW_HEIGHT;
+                width_reciprocal = WINDOW_WIDTH_RECIPROCAL;
+                height_reciprocal = WINDOW_HEIGHT_RECIPROCAL;
+                stored_pixels = full_stored_pixels;
+                pixels_size = FULL_PIXELS_SIZE;
+            }
+            else
+            {
+                fputs("Found invalid state when rendering.", stderr);
+                exit_code = EXIT_FAILURE;
+                goto cleanup;
+            }
             
-            for (int x = 0; x < THREAD_X_SIZE; x += SHOW_X_INTERVAL)
+            for (int x = 0; x < thread_x_size; x += show_x_interval)
             {
                 uint8_t *pixels;
                 int pitch;
-                if (SDL_LockTexture(full_texture, NULL, (void**)&pixels, &pitch) < 0)
+                if (SDL_LockTexture(texture, NULL, (void**)&pixels, &pitch) < 0)
                 {
-                    fprintf(stderr, "Unable to lock full texture: %s\n", SDL_GetError());
+                    fprintf(stderr, "Unable to lock texture: %s\n", SDL_GetError());
                     exit_code = EXIT_FAILURE;
                     goto cleanup;
                 }
@@ -660,16 +742,16 @@ int main()
                 for (int i = 0; i < THREADS; i++)
                 {
                     // Quick hack for "bottom blocks reverse X" effect
-                    int visual_x = (i < 4) ? x : (THREAD_X_SIZE - x - SHOW_X_INTERVAL);
+                    int visual_x = (i < 4) ? x : (thread_x_size - x - show_x_interval);
                     thread_datas[i] = (struct thread_data){
                         thread_blocks[i].x_start + visual_x,
-                        thread_blocks[i].x_start + visual_x + SHOW_X_INTERVAL - 1,
+                        thread_blocks[i].x_start + visual_x + show_x_interval - 1,
                         thread_blocks[i].y_start,
                         thread_blocks[i].y_end,
-                        WINDOW_WIDTH,
-                        WINDOW_HEIGHT,
-                        WINDOW_WIDTH_RECIPROCAL,
-                        WINDOW_HEIGHT_RECIPROCAL,
+                        width,
+                        height,
+                        width_reciprocal,
+                        height_reciprocal,
                         size,
                         center_x,
                         center_y,
@@ -696,9 +778,9 @@ int main()
                     }
                 }
 
-                memcpy(pixels, stored_pixels, PIXELS_SIZE);
-                SDL_UnlockTexture(full_texture);
-                if (SHOW_PREVIEW_WHEN_RENDERING)
+                memcpy(pixels, stored_pixels, pixels_size);
+                SDL_UnlockTexture(texture);
+                if (state == STATE_PREVIEW || SHOW_PREVIEW_WHEN_RENDERING)
                 {
                     if (SDL_RenderCopy(renderer, preview_texture, NULL, NULL) < 0)
                     {
@@ -707,23 +789,26 @@ int main()
                         goto cleanup;
                     }
                 }
-                if (SDL_RenderCopy(renderer, full_texture, NULL, NULL) < 0)
+                if (state == STATE_FULL)
                 {
-                    fprintf(stderr, "Unable to copy full texture: %s\n", SDL_GetError());
-                    exit_code = EXIT_FAILURE;
-                    goto cleanup;
+                    if (SDL_RenderCopy(renderer, full_texture, NULL, NULL) < 0)
+                    {
+                        fprintf(stderr, "Unable to copy full texture: %s\n", SDL_GetError());
+                        exit_code = EXIT_FAILURE;
+                        goto cleanup;
+                    }
                 }
                 SDL_RenderPresent(renderer);
             }
 
             uint64_t end_time = SDL_GetPerformanceCounter();
             float time_taken = (float)(end_time - begin_time) / (float)SDL_GetPerformanceFrequency() * 1000;
-            printf("Full render completed. Time taken: %fms.\n", time_taken);
+            printf("%s render completed. Time taken: %fms. Iterations: %llu\n", (state == STATE_PREVIEW) ? "Preview" : "Full", time_taken, iterations);
         }
 
-        if (SDL_RenderCopy(renderer, full_texture, NULL, NULL) < 0)
+        if (SDL_RenderCopy(renderer, (state == STATE_PREVIEW) ? preview_texture : full_texture, NULL, NULL) < 0)
         {
-            fprintf(stderr, "Unable to copy full texture: %s\n", SDL_GetError());
+            fprintf(stderr, "Unable to copy %s texture: %s\n", (state == STATE_PREVIEW) ? "preview" : "full", SDL_GetError());
             exit_code = EXIT_FAILURE;
             goto cleanup;
         }
@@ -743,7 +828,8 @@ int main()
 
     cleanup:
     puts("Quitting...");
-    free(stored_pixels);
+    free(preview_stored_pixels);
+    free(full_stored_pixels);
     SDL_DestroyTexture(preview_texture);
     SDL_DestroyTexture(full_texture);
     SDL_DestroyRenderer(renderer);
