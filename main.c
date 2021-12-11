@@ -1,5 +1,16 @@
-#include "SDL2/SDL_image.h"
-#include "SDL2/SDL_render.h"
+// INTRODUCTION
+//
+// Welcome to Mandelbrot, with big floats. This is a work in progress, so in the
+// meantime, here's a TODO list of things I still need to do.
+//
+// TODO: Better colouring
+// TODO: Better iteration calculation
+// TODO: Optimise
+// TODO: Make movie
+// And of course, TODO: Make video (probably 2-parter).
+// FIXME: When in full mode, clicking shows old preview data. Maybe fix by clearing screen first?
+//
+
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_image.h>
 #include <stdio.h>
@@ -10,7 +21,17 @@
 #include <math.h>
 #include <assert.h>
 
-#define MAX_TITLE_LENGTH 256 
+// CONFIGURATION AND OUTLINE
+//
+// This version of the program has two modes; preview and full-sized rendering.
+// Both modes are nearly identical except for the resolution in which they are
+// rendered at. In an earlier version of this program, the preview mode was able
+// to run at 60fps, navigatable by keyboard. Howver, ever since the switch from
+// doubles to big floats, the program does not run fast enough to enjoy that
+// level of interactivity. As such, both modes operate on click-to-zoom.
+//
+// First, let's define some configur
+
 #define WINDOW_WIDTH 900
 #define WINDOW_HEIGHT 600
 #define WINDOW_WIDTH_RECIPROCAL (struct fp256){ SIGN_POS,   { 0, 0x0048d159e26af37c, 0x048d159e26af37c0, 0x48d159e26af37c04 } }
@@ -18,6 +39,8 @@
 #define FULL_PIXELS_SIZE (WINDOW_WIDTH * WINDOW_HEIGHT * 4)
 #define FULL_SHOW_X_INTERVAL 5
 #define FULL_THREAD_X_SIZE 225
+
+#define MAX_TITLE_LENGTH 256 
 
 #define PREVIEW_WIDTH 240
 #define PREVIEW_HEIGHT 160
@@ -596,6 +619,8 @@ int main()
         int mouse_x, mouse_y;
         SDL_PumpEvents();
         SDL_GetMouseState(&mouse_x, &mouse_y);
+        SDL_Window *window_cursor = SDL_GetMouseFocus();
+        bool cursor_in_window = window_cursor != NULL;
 
         SDL_Event event;
         while (SDL_PollEvent(&event))
@@ -651,7 +676,7 @@ int main()
                         center_x = calculateMathPos(mouse_x, WINDOW_WIDTH_RECIPROCAL, size_x, center_x);
                         center_y = calculateMathPos(WINDOW_HEIGHT - mouse_y, WINDOW_HEIGHT_RECIPROCAL, size, center_y);
                         size = fp_smul256(size, ZOOM);
-                        iterations += 64; // TODO: Less hardcoded
+                        iterations *= 2; // TODO: Less hardcoded
                         memset(full_stored_pixels, 0, FULL_PIXELS_SIZE);
                         memset(preview_stored_pixels, 0, PREVIEW_PIXELS_SIZE);
                     }
@@ -659,7 +684,7 @@ int main()
                     {
                         haveToRender = true;
                         size = fp_smul256(size, ZOOM_RECIPROCAL);
-                        iterations -= 64;
+                        iterations /= 2;
                         memset(full_stored_pixels, 0, FULL_PIXELS_SIZE);
                         memset(preview_stored_pixels, 0, PREVIEW_PIXELS_SIZE);
                     }
@@ -814,14 +839,17 @@ int main()
         }
 
         // Show zoom highlight
-        SDL_Rect dest_zoom_rect =
+        if (cursor_in_window)
         {
-            mouse_x - ZOOM_IMAGE_SIZE_X / 2,
-            mouse_y - ZOOM_IMAGE_SIZE_Y / 2,
-            ZOOM_IMAGE_SIZE_X,
-            ZOOM_IMAGE_SIZE_Y
-        };
-        SDL_RenderCopy(renderer, zoom_image, NULL, &dest_zoom_rect);
+            SDL_Rect dest_zoom_rect =
+            {
+                mouse_x - ZOOM_IMAGE_SIZE_X / 2,
+                mouse_y - ZOOM_IMAGE_SIZE_Y / 2,
+                ZOOM_IMAGE_SIZE_X,
+                ZOOM_IMAGE_SIZE_Y
+            };
+            SDL_RenderCopy(renderer, zoom_image, NULL, &dest_zoom_rect);
+        }
 
         SDL_RenderPresent(renderer);
     }
