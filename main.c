@@ -117,47 +117,58 @@ enum sign
     SIGN_POS
 };
 
-struct fp4
+/*
+struct fp128
+{
+    enum sign sign;
+    uint64_t man[2];
+};
+*/
+
+struct fp256
 {
     enum sign sign;
     uint64_t man[4];
 };
 
-struct fp8
+struct fp512
 {
     enum sign sign;
     uint64_t man[8];
 };
 
-struct fp4 fp_uadd4(struct fp4 a, struct fp4 b)
-{
-    struct fp4 c;
-    asm("ADDS %3, %7, %11\n"
-        "ADCS %2, %6, %10\n"
-        "ADCS %1, %5, %9\n"
-        "ADCS %0, %4, %8"
-        :
-        "=&r"(c.man[0]), // 0
-        "=&r"(c.man[1]), // 1
-        "=&r"(c.man[2]), // 2
-        "=&r"(c.man[3])  // 3
-        :
-        "r"  (a.man[0]), // 4
-        "r"  (a.man[1]), // 5
-        "r"  (a.man[2]), // 6
-        "r"  (a.man[3]), // 7
-        "r"  (b.man[0]), // 8
-        "r"  (b.man[1]), // 9
-        "r"  (b.man[2]), // 10
-        "r"  (b.man[3])  // 11
-        :
-        "cc");
-    return c;
+#define DEF_FP_UADDSUB256(name, op, opc) struct fp256 fp_u##name##256(struct fp256 a, struct fp256 b) \
+{ \
+    struct fp256 c; \
+    asm(#op  "S %3, %7, %11\n" \
+        #opc "S %2, %6, %10\n" \
+        #opc "S %1, %5, %9\n" \
+        #opc "S %0, %4, %8" \
+        : \
+        "=&r"(c.man[0]), /* 0 */ \
+        "=&r"(c.man[1]), /* 1 */ \
+        "=&r"(c.man[2]), /* 2 */ \
+        "=&r"(c.man[3])  /* 3 */ \
+        : \
+        "r"  (a.man[0]), /* 4 */ \
+        "r"  (a.man[1]), /* 5 */ \
+        "r"  (a.man[2]), /* 6 */ \
+        "r"  (a.man[3]), /* 7 */ \
+        "r"  (b.man[0]), /* 8 */ \
+        "r"  (b.man[1]), /* 9 */ \
+        "r"  (b.man[2]), /* 10 */ \
+        "r"  (b.man[3])  /* 11 */ \
+        : \
+        "cc"); \
+    return c; \
 }
+DEF_FP_UADDSUB256(add, ADD, ADC);
+// Note: a > b must be true if using sub, except if for comparing.
+DEF_FP_UADDSUB256(sub, SUB, SBC);
 
-struct fp8 fp_uadd8(struct fp8 a, struct fp8 b)
+struct fp512 fp_uadd512(struct fp512 a, struct fp512 b)
 {
-    struct fp8 c;
+    struct fp512 c;
     asm("ADDS %7, %15, %23\n"
         "ADCS %6, %14, %22\n"
         "ADCS %5, %13, %21\n"
@@ -197,10 +208,85 @@ struct fp8 fp_uadd8(struct fp8 a, struct fp8 b)
     return c;
 }
 
-struct fp4 fp_smul4(struct fp4 a, struct fp4 b)
+enum cmp
+{
+    CMP_SAME,
+    CMP_A_BIG,
+    CMP_B_BIG
+};
+
+enum cmp fp_ucmp256(struct fp256 a, struct fp256 b)
+{
+    static const uint64_t zero[4];
+    struct fp256 c = fp_usub256(a, b);
+    bool is_negative = (c.man[0] >> 63) == 1;
+    if (is_negative)
+        return CMP_B_BIG;
+    else
+        if (memcmp(c.man, zero, 4 * sizeof(uint64_t)) == 0)
+            return CMP_SAME;
+        else
+            return CMP_A_BIG;
+}
+
+struct fp256 fp_sadd256(struct fp256 a, struct fp256 b)
+{
+    if (a.sign == SIGN_ZERO && b.sign == SIGN_ZERO)
+        return a;
+    if (b.sign == SIGN_ZERO)
+        return a;
+    if (a.sign == SIGN_ZERO)
+        return b;
+    if ((a.sign == SIGN_POS && b.sign == SIGN_POS) ||
+        (a.sign == SIGN_NEG && b.sign == SIGN_NEG))
+    {
+        struct fp256 c = fp_uadd256(a, b);
+        c.sign = a.sign;
+        return c;
+    }
+
+    assert((a.sign == SIGN_POS && b.sign == SIGN_NEG) ||
+           (a.sign == SIGN_NEG && b.sign == SIGN_POS));
+    enum cmp cmp = fp_ucmp256(a, b);
+    if (cmp == CMP_SAME)
+        return (struct fp256) { SIGN_ZERO, {0} };
+    
+    if (a.sign == SIGN_POS && b.sign == SIGN_NEG)
+    {
+        if (cmp == CMP_A_BIG)
+        {
+            struct fp256 c = fp_usub256(a, b);
+            c.sign = SIGN_POS;
+            return c;
+        }
+        else
+        {
+            struct fp256 c = fp_usub256(b, a);
+            c.sign = SIGN_NEG;
+            return c;
+        }
+    }
+    else
+    {
+        if (cmp == CMP_A_BIG)
+        {
+            struct fp256 c = fp_usub256(a, b);
+            c.sign = SIGN_NEG;
+            return c;
+        }
+        else
+        {
+            struct fp256 c = fp_usub256(b, a);
+            c.sign = SIGN_POS;
+            return c;
+        }
+    }
+}
+
+struct fp256 fp_smul256(struct fp256 a, struct fp256 b)
 {
     if (a.sign == SIGN_ZERO || b.sign == SIGN_ZERO)
-        return (struct fp4) { SIGN_ZERO, {0} };
+        return (struct fp256) { SIGN_ZERO, {0} };
 
     enum sign sign;
     if (a.sign == SIGN_NEG && b.sign == SIGN_NEG)
@@ -210,7 +296,7 @@ struct fp4 fp_smul4(struct fp4 a, struct fp4 b)
     else
         sign = SIGN_POS;
 
-    struct fp8 c = {0};
+    struct fp512 c = {0};
     for (int i = 3; i >= 0; i--) // a
     {
         for (int j = 3; j >= 0; j--) // b
@@ -220,23 +306,23 @@ struct fp4 fp_smul4(struct fp4 a, struct fp4 b)
             int high_offset = low_offset - 1;
 
             __uint128_t mult = (__uint128_t)a.man[i] * (__uint128_t)b.man[j];
-            struct fp8 temp = {0};
+            struct fp512 temp = {0};
             temp.man[low_offset] = (uint64_t)mult;
             temp.man[high_offset] = mult >> 64;
 
-            for (int k = 0; k < 8; k++)
+            /*for (int k = 0; k < 8; k++)
                 printf("%llx ", temp.man[k]);
-            puts("");
+            puts("");*/
 
-            c = fp_uadd8(c, temp);
+            c = fp_uadd512(c, temp);
         }
     }
 
-    struct fp4 c4;
-    c4.sign = sign;
-    memcpy(c4.man, c.man + 1, 4 * sizeof(uint64_t));
+    struct fp256 c256;
+    c256.sign = sign;
+    memcpy(c256.man, c.man + 1, 4 * sizeof(uint64_t));
 
-    return c4;
+    return c256;
 }
 
 // Complex
@@ -352,13 +438,13 @@ int main()
 {
     // Test bigfloat
 
-    struct fp4 a = { SIGN_NEG, { 2, 0xC000000000000000, 0, 0 } };
-    struct fp4 b = { SIGN_POS, { 5, 0x2000000000000000, 0, 0 } };
-    struct fp4 c = fp_smul4(a, b);
+    struct fp256 a = { SIGN_ZERO, { 0, 0, 0, 50 } };
+    struct fp256 b = { SIGN_ZERO, { 0, 0, 0, 3 } };
+    struct fp256 c = fp_sadd256(a, b);
     printf("c = ");
     if (c.sign == SIGN_NEG) printf("- ");
     for (int i = 0; i < 4; i++)
-        printf("%llx ", c.man[i]);
+        printf("%llu ", c.man[i]);
     puts("");
 
     return 0;

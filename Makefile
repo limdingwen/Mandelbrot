@@ -6,3 +6,6 @@ mandelbrot: main.c Makefile
 
 mandelbrot.s: main.c Makefile
 	clang main.c -o $@ -S -O0 -I/opt/homebrew/include
+
+mandelbrot.e: main.c Makefile
+	clang main.c -o $@ -E -I/opt/homebrew/include
