@@ -143,7 +143,7 @@ struct fp512
     asm(#op  "S %3, %7, %11\n" \
         #opc "S %2, %6, %10\n" \
         #opc "S %1, %5, %9\n" \
-        #opc "S %0, %4, %8" \
+        #opc "  %0, %4, %8" \
         : \
         "=&r"(c.man[0]), /* 0 */ \
         "=&r"(c.man[1]), /* 1 */ \
@@ -176,7 +176,7 @@ struct fp512 fp_uadd512(struct fp512 a, struct fp512 b)
         "ADCS %3, %11, %19\n"
         "ADCS %2, %10, %18\n"
         "ADCS %1, %9, %17\n"
-        "ADCS %0, %8, %16"
+        "ADC  %0, %8, %16"
         :
         "=&r"(c.man[0]), // 0
         "=&r"(c.man[1]), // 1
@@ -436,6 +436,7 @@ void *thread(void *arg)
 
 int main()
 {
+/*
     // Test bigfloat
 
     struct fp256 a = { SIGN_ZERO, { 0, 0, 0, 50 } };
@@ -448,8 +449,8 @@ int main()
     puts("");
 
     return 0;
+*/
 
-/*
     int err;
     int exit_code = EX_OK;
 
@@ -747,5 +748,4 @@ int main()
     SDL_Quit();
 
     return exit_code;
-*/
 }
