@@ -1,10 +1,12 @@
+#include "SDL2/SDL_image.h"
+#include "SDL2/SDL_render.h"
 #include <SDL2/SDL.h>
+#include <SDL2/SDL_image.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
 #include <stdbool.h>
 #include <pthread.h>
-#include <sysexits.h>
 #include <math.h>
 #include <assert.h>
 
@@ -70,11 +72,13 @@ const struct color gradient_stops[GRADIENT_STOP_COUNT + 1] =
 #define INITIAL_CENTER_X (struct fp256){ SIGN_NEG, { 0, 0x8000000000000000, 0, 0 } } // -0.5f
 #define INITIAL_CENTER_Y (struct fp256){ SIGN_ZERO, {0} } // 0
 #define INITIAL_SIZE (struct fp256){ SIGN_POS, { 2, 0, 0, 0 }} // 2
-#define SIZE_RATIO_X (struct fp256){ SIGN_POS, { 1, 0x8000000000000000, 0, 0 } } //1.5f
+#define SIZE_RATIO_X (struct fp256){ SIGN_POS, { 1, 0x8000000000000000, 0, 0 } } // 1.5f
 
-//#define PAN_SPEED 1
-//#define ZOOM_SPEED 1
-#define COUNTER_TO_S (struct fp256){ SIGN_POS, { 0, 0x000000b2f4fc0794, 0x908cf232ff786259, 0x02416a7530755a66 } }
+#define ZOOM_IMAGE_PATH "zoom.png"
+#define ZOOM_IMAGE_SIZE_X 225
+#define ZOOM_IMAGE_SIZE_Y 150
+#define ZOOM (struct fp256){ SIGN_POS, { 0, 0x4000000000000000, 0, 0 } } // 0.25f
+#define ZOOM_RECIPROCAL (struct fp256){ SIGN_POS, { 4, 0, 0, 0 } }
 
 enum state
 {
@@ -121,14 +125,6 @@ enum sign
     SIGN_POS
 };
 
-/*
-struct fp128
-{
-    enum sign sign;
-    uint64_t man[2];
-};
-*/
-
 struct fp256
 {
     enum sign sign;
@@ -169,6 +165,7 @@ struct fp512
 DEF_FP_UADDSUB256(add, ADD, ADC);
 // Note: a > b must be true if using sub, except if for comparing.
 DEF_FP_UADDSUB256(sub, SUB, SBC);
+#undef DEF_FP_UADDSUB256
 
 struct fp512 fp_uadd512(struct fp512 a, struct fp512 b)
 {
@@ -221,7 +218,7 @@ enum cmp
 
 enum cmp fp_ucmp256(struct fp256 a, struct fp256 b)
 {
-    static const uint64_t zero[4];
+    static const uint64_t zero[4]; // static is 0 by default
     struct fp256 c = fp_usub256(a, b);
     bool is_negative = (c.man[0] >> 63) == 1;
     if (is_negative)
@@ -326,10 +323,6 @@ struct fp256 fp_smul256(struct fp256 a, struct fp256 b)
             temp.man[low_offset] = (uint64_t)mult;
             temp.man[high_offset] = mult >> 64;
 
-            //for (int k = 0; k < 8; k++)
-            //    printf("%llx ", temp.man[k]);
-            //puts("");
-
             c = fp_uadd512(c, temp);
         }
     }
@@ -377,34 +370,6 @@ struct fp256 int_to_fp256(int a)
 }
 
 // Complex
-
-/*
-struct complex
-{
-    double x;
-    double y;
-};
-
-struct complex complex_add(struct complex a, struct complex b)
-{
-    return (struct complex) { a.x + b.x, a.y + b.y };
-}
-
-struct complex complex_mul(struct complex a, struct complex b)
-{
-    return (struct complex) { a.x*b.x - a.y*b.y, a.x*b.y + b.x*a.y };
-}
-
-struct complex complex_sqr(struct complex a)
-{
-    return complex_mul(a, a);
-}
-
-double complex_sqrmag(struct complex a)
-{
-    return a.x*a.x + a.y*a.y;
-}
-*/
 
 struct complex
 {
@@ -523,44 +488,26 @@ void *thread(void *arg)
 
 int main()
 {
-/*
-    // Test bigfloat
-    // add, sub, mul, sqr, asr, int
-
-    struct fp256 a = { SIGN_POS, { 0, 0x926e978d4fdf3b64, 0x5a1cac083126e978, 0xd4fdf3b645a1cac0 } };
-    //struct fp256 b = { SIGN_NEG, { 1, 0x61cac083126e978d, 0x4fdf3b645a1cac08, 0x3126e978d4fdf3b6 } };
-    struct fp256 b = int_to_fp256(-43);
-    printf("b = ");
-    if (b.sign == SIGN_NEG) printf("-");
-    printf("%llx.%llx_%llx_%llx\n", b.man[0], b.man[1], b.man[2], b.man[3]);
-    struct fp256 c = fp_smul256(a, b);
-    printf("c = ");
-    if (c.sign == SIGN_NEG) printf("-");
-    printf("%llx.%llx_%llx_%llx\n", c.man[0], c.man[1], c.man[2], c.man[3]);
-
-    return 0;
-*/
-
     int err;
-    int exit_code = EX_OK;
+    int exit_code = EXIT_SUCCESS;
 
     // Start SDL
 
     uint8_t *stored_pixels = NULL;
     SDL_Renderer *renderer = NULL;
     SDL_Window *window = NULL;
-    SDL_Texture *full_texture = NULL, *preview_texture = NULL;
+    SDL_Texture *full_texture = NULL, *preview_texture = NULL, *zoom_image = NULL;
 
     if (SDL_Init(SDL_INIT_VIDEO) < 0)
     {
-        fprintf(stderr, "Unable to init SDL: %s\n", SDL_GetError());
-        exit_code = EX_OSERR;
+        fprintf(stderr, "Unable to init SDL2: %s\n", SDL_GetError());
+        exit_code = EXIT_FAILURE;
         goto cleanup;
     }
     if (SDL_CreateWindowAndRenderer(WINDOW_WIDTH, WINDOW_HEIGHT, 0, &window, &renderer) == -1)
     {
         fprintf(stderr, "Unable to create window and renderer: %s\n", SDL_GetError());
-        exit_code = EX_OSERR;
+        exit_code = EXIT_FAILURE;
         goto cleanup;
     }
     full_texture = SDL_CreateTexture(renderer,
@@ -568,7 +515,7 @@ int main()
     if (full_texture == NULL)
     {
         fprintf(stderr, "Unable to create full texture: %s\n", SDL_GetError());
-        exit_code = EX_OSERR;
+        exit_code = EXIT_FAILURE;
         goto cleanup;
     }
     if (SHOW_PREVIEW_WHEN_RENDERING)
@@ -585,8 +532,26 @@ int main()
     if (preview_texture == NULL)
     {
         fprintf(stderr, "Unable to create preview texture: %s\n", SDL_GetError());
-        exit_code = EX_OSERR;
+        exit_code = EXIT_FAILURE;
         goto cleanup;
+    }
+    if (IMG_Init(IMG_INIT_PNG) == 0)
+    {
+        fprintf(stderr, "Unable to initialise SDL2 image: %s\n", IMG_GetError());
+        exit_code = EXIT_FAILURE;
+        goto cleanup;
+    }
+    zoom_image = IMG_LoadTexture(renderer, ZOOM_IMAGE_PATH);
+    if (zoom_image == NULL)
+    {
+        fprintf(stderr, "Unable to load zoom image: %s\n", IMG_GetError());
+        exit_code = EXIT_FAILURE;
+        goto cleanup;
+    }
+    if (SDL_SetTextureBlendMode(zoom_image, SDL_BLENDMODE_BLEND) == -1)
+    {
+        fputs("Blend blendmode not supported on this platform.", stderr);
+        fputs("Zoom image may not show correctly.", stderr);
     }
     puts("Started.");
 
@@ -599,21 +564,21 @@ int main()
     if (stored_pixels == NULL)
     {
         fputs("Unable to allocate memory for stored_pixels.", stderr);
-        exit_code = EX_OSERR;
+        exit_code = EXIT_FAILURE;
         goto cleanup;
     }
-    const uint8_t *keys = SDL_GetKeyboardState(NULL);
-
-    bool running = true;
-    uint64_t now = SDL_GetPerformanceCounter();
-    uint64_t last = 0;
-    struct fp256 dt = { SIGN_ZERO, {0} };
 
     enum state state = STATE_PREVIEW;
-    bool haveToRenderFull = true;
+    bool haveToRender = true;
 
+    bool running = true;
     while (running)
     {
+        // FIXME: Mouse lag
+        int mouse_x, mouse_y;
+        SDL_PumpEvents();
+        SDL_GetMouseState(&mouse_x, &mouse_y);
+
         SDL_Event event;
         while (SDL_PollEvent(&event))
         {
@@ -635,9 +600,27 @@ int main()
 
                         if (state == STATE_FULL)
                         {
-                            haveToRenderFull = true;
+                            haveToRender = true;
                             memset(stored_pixels, 0, PIXELS_SIZE);
                         }
+                    }
+                }
+                break;
+
+                case SDL_MOUSEBUTTONUP:
+                {
+                    if (event.button.button == SDL_BUTTON_LEFT)
+                    {
+                        haveToRender = true;
+                        struct fp256 size_x = fp_smul256(size, SIZE_RATIO_X);
+                        center_x = calculateMathPos(mouse_x, WINDOW_WIDTH_RECIPROCAL, size_x, center_x);
+                        center_y = calculateMathPos(WINDOW_HEIGHT - mouse_y, WINDOW_HEIGHT_RECIPROCAL, size, center_y);
+                        size = fp_smul256(size, ZOOM);
+                    }
+                    else if (event.button.button == SDL_BUTTON_RIGHT)
+                    {
+                        haveToRender = true;
+                        size = fp_smul256(size, ZOOM_RECIPROCAL);
                     }
                 }
                 break;
@@ -648,135 +631,27 @@ int main()
         //if (iterations_x < 0) iterations_x = 0;
         //double iterations_graph = ITERATIONS_M * iterations_x + ITERATIONS_C;
         //int iterations = (int)(iterations_graph * iterations_graph);
-        int iterations = 16;
+        int iterations = 32;
 
         //char title_str[MAX_TITLE_LENGTH];
         //snprintf(title_str, MAX_TITLE_LENGTH, "X: %.17g, Y: %.17g, Size: %.17g, Iterations: %d", center_x, center_y, size, iterations);
         //SDL_SetWindowTitle(window, title_str);
 
-        switch (state)
+        // Render mandelbrot
+
+        if (haveToRender)
         {
-            case STATE_FULL:
+            haveToRender = false;
+            uint64_t begin_time = SDL_GetPerformanceCounter();
+            
+            for (int x = 0; x < THREAD_X_SIZE; x += SHOW_X_INTERVAL)
             {
-                // Render mandelbrot
-
-                if (haveToRenderFull)
-                {
-                    haveToRenderFull = false;
-                    uint64_t begin_time = SDL_GetPerformanceCounter();
-                    
-                    for (int x = 0; x < THREAD_X_SIZE; x += SHOW_X_INTERVAL)
-                    {
-                        uint8_t *pixels;
-                        int pitch;
-                        if (SDL_LockTexture(full_texture, NULL, (void**)&pixels, &pitch) < 0)
-                        {
-                            fprintf(stderr, "Unable to lock full texture: %s\n", SDL_GetError());
-                            exit_code = EX_OSERR;
-                            goto cleanup;
-                        }
-
-                        pthread_t thread_ids[THREADS];
-                        struct thread_data thread_datas[THREADS];
-                        for (int i = 0; i < THREADS; i++)
-                        {
-                            // Quick hack for "bottom blocks reverse X" effect
-                            int visual_x = (i < 4) ? x : (THREAD_X_SIZE - x - SHOW_X_INTERVAL);
-                            thread_datas[i] = (struct thread_data){
-                                thread_blocks[i].x_start + visual_x,
-                                thread_blocks[i].x_start + visual_x + SHOW_X_INTERVAL - 1,
-                                thread_blocks[i].y_start,
-                                thread_blocks[i].y_end,
-                                WINDOW_WIDTH,
-                                WINDOW_HEIGHT,
-                                WINDOW_WIDTH_RECIPROCAL,
-                                WINDOW_HEIGHT_RECIPROCAL,
-                                size,
-                                center_x,
-                                center_y,
-                                iterations,
-                                stored_pixels
-                            };
-                            err = pthread_create(&thread_ids[i], NULL, thread, &thread_datas[i]);
-                            if (err != 0)
-                            {
-                                fprintf(stderr, "Unable to create thread: Error code %d\n", err);
-                                exit_code = EX_OSERR;
-                                goto cleanup;
-                            }
-                        }
-
-                        for (int i = 0; i < THREADS; i++)
-                        {
-                            err = pthread_join(thread_ids[i], NULL);
-                            if (err != 0)
-                            {
-                                fprintf(stderr, "Unable to join thread: Error code %d\n", err);
-                                exit_code = EX_OSERR;
-                                goto cleanup;
-                            }
-                        }
-
-                        memcpy(pixels, stored_pixels, PIXELS_SIZE);
-                        SDL_UnlockTexture(full_texture);
-                        if (SHOW_PREVIEW_WHEN_RENDERING)
-                        {
-                            if (SDL_RenderCopy(renderer, preview_texture, NULL, NULL) < 0)
-                            {
-                                fprintf(stderr, "Unable to copy preview texture: %s\n", SDL_GetError());
-                                exit_code = EX_OSERR;
-                                goto cleanup;
-                            }
-                        }
-                        if (SDL_RenderCopy(renderer, full_texture, NULL, NULL) < 0)
-                        {
-                            fprintf(stderr, "Unable to copy full texture: %s\n", SDL_GetError());
-                            exit_code = EX_OSERR;
-                            goto cleanup;
-                        }
-                        SDL_RenderPresent(renderer);
-                    }
-
-                    uint64_t end_time = SDL_GetPerformanceCounter();
-                    float time_taken = (float)(end_time - begin_time) / (float)SDL_GetPerformanceFrequency() * 1000;
-                    printf("Full render completed. Time taken: %fms.\n", time_taken);
-                }
-
-                if (SDL_RenderCopy(renderer, full_texture, NULL, NULL) < 0)
-                {
-                    fprintf(stderr, "Unable to copy full texture: %s\n", SDL_GetError());
-                    exit_code = EX_OSERR;
-                    goto cleanup;
-                }
-                SDL_RenderPresent(renderer);
-            }
-            break;
-
-            case STATE_PREVIEW:
-            {
-                //if (keys[SDL_SCANCODE_W]) center_y += size * PAN_SPEED * dt;
-                //if (keys[SDL_SCANCODE_A]) center_x -= size * PAN_SPEED * dt;
-                //if (keys[SDL_SCANCODE_S]) center_y -= size * PAN_SPEED * dt;
-                //if (keys[SDL_SCANCODE_D]) center_x += size * PAN_SPEED * dt;
-                //if (keys[SDL_SCANCODE_R]) size -= size * ZOOM_SPEED * dt;
-                //if (keys[SDL_SCANCODE_F]) size += size * ZOOM_SPEED * dt;
-
-                if (keys[SDL_SCANCODE_W]) center_y = fp_sadd256(center_y, fp_smul256(size, dt));
-                if (keys[SDL_SCANCODE_A]) center_x = fp_ssub256(center_x, fp_smul256(size, dt));
-                if (keys[SDL_SCANCODE_S]) center_y = fp_ssub256(center_y, fp_smul256(size, dt));
-                if (keys[SDL_SCANCODE_D]) center_x = fp_sadd256(center_x, fp_smul256(size, dt));
-                if (keys[SDL_SCANCODE_R]) size = fp_ssub256(size, fp_smul256(size, dt));
-                if (keys[SDL_SCANCODE_F]) size = fp_sadd256(size, fp_smul256(size, dt));
-
-                // Render mandelbrot
-                // TODO: Only render when needed
-
                 uint8_t *pixels;
                 int pitch;
-                if (SDL_LockTexture(preview_texture, NULL, (void**)&pixels, &pitch) < 0)
+                if (SDL_LockTexture(full_texture, NULL, (void**)&pixels, &pitch) < 0)
                 {
-                    fprintf(stderr, "Unable to lock preview texture: %s\n", SDL_GetError());
-                    exit_code = EX_OSERR;
+                    fprintf(stderr, "Unable to lock full texture: %s\n", SDL_GetError());
+                    exit_code = EXIT_FAILURE;
                     goto cleanup;
                 }
 
@@ -784,26 +659,28 @@ int main()
                 struct thread_data thread_datas[THREADS];
                 for (int i = 0; i < THREADS; i++)
                 {
+                    // Quick hack for "bottom blocks reverse X" effect
+                    int visual_x = (i < 4) ? x : (THREAD_X_SIZE - x - SHOW_X_INTERVAL);
                     thread_datas[i] = (struct thread_data){
-                        PREVIEW_X_SIZE * i,
-                        PREVIEW_X_SIZE * (i + 1) - 1,
-                        0,
-                        PREVIEW_HEIGHT,
-                        PREVIEW_WIDTH,
-                        PREVIEW_HEIGHT,
-                        PREVIEW_WIDTH_RECIPROCAL,
-                        PREVIEW_HEIGHT_RECIPROCAL,
+                        thread_blocks[i].x_start + visual_x,
+                        thread_blocks[i].x_start + visual_x + SHOW_X_INTERVAL - 1,
+                        thread_blocks[i].y_start,
+                        thread_blocks[i].y_end,
+                        WINDOW_WIDTH,
+                        WINDOW_HEIGHT,
+                        WINDOW_WIDTH_RECIPROCAL,
+                        WINDOW_HEIGHT_RECIPROCAL,
                         size,
                         center_x,
                         center_y,
                         iterations,
-                        pixels
+                        stored_pixels
                     };
                     err = pthread_create(&thread_ids[i], NULL, thread, &thread_datas[i]);
                     if (err != 0)
                     {
                         fprintf(stderr, "Unable to create thread: Error code %d\n", err);
-                        exit_code = EX_OSERR;
+                        exit_code = EXIT_FAILURE;
                         goto cleanup;
                     }
                 }
@@ -814,30 +691,54 @@ int main()
                     if (err != 0)
                     {
                         fprintf(stderr, "Unable to join thread: Error code %d\n", err);
-                        exit_code = EX_OSERR;
+                        exit_code = EXIT_FAILURE;
                         goto cleanup;
                     }
                 }
 
-                SDL_UnlockTexture(preview_texture);
-                if (SDL_RenderCopy(renderer, preview_texture, NULL, NULL) < 0)
+                memcpy(pixels, stored_pixels, PIXELS_SIZE);
+                SDL_UnlockTexture(full_texture);
+                if (SHOW_PREVIEW_WHEN_RENDERING)
                 {
-                    fprintf(stderr, "Unable to copy preview texture: %s\n", SDL_GetError());
-                    exit_code = EX_OSERR;
+                    if (SDL_RenderCopy(renderer, preview_texture, NULL, NULL) < 0)
+                    {
+                        fprintf(stderr, "Unable to copy preview texture: %s\n", SDL_GetError());
+                        exit_code = EXIT_FAILURE;
+                        goto cleanup;
+                    }
+                }
+                if (SDL_RenderCopy(renderer, full_texture, NULL, NULL) < 0)
+                {
+                    fprintf(stderr, "Unable to copy full texture: %s\n", SDL_GetError());
+                    exit_code = EXIT_FAILURE;
                     goto cleanup;
                 }
                 SDL_RenderPresent(renderer);
-
-                // Calculate dt
-
-                last = now;
-                now = SDL_GetPerformanceCounter();
-                dt = fp_smul256(int_to_fp256((int)(now - last)), COUNTER_TO_S);
-                float msTaken = ((float)(now - last) / (float)SDL_GetPerformanceFrequency()) * 1000;
-                printf("Preview render completed. Time taken: %fms.\n", msTaken);
             }
-            break;
+
+            uint64_t end_time = SDL_GetPerformanceCounter();
+            float time_taken = (float)(end_time - begin_time) / (float)SDL_GetPerformanceFrequency() * 1000;
+            printf("Full render completed. Time taken: %fms.\n", time_taken);
         }
+
+        if (SDL_RenderCopy(renderer, full_texture, NULL, NULL) < 0)
+        {
+            fprintf(stderr, "Unable to copy full texture: %s\n", SDL_GetError());
+            exit_code = EXIT_FAILURE;
+            goto cleanup;
+        }
+
+        // Show zoom highlight
+        SDL_Rect dest_zoom_rect =
+        {
+            mouse_x - ZOOM_IMAGE_SIZE_X / 2,
+            mouse_y - ZOOM_IMAGE_SIZE_Y / 2,
+            ZOOM_IMAGE_SIZE_X,
+            ZOOM_IMAGE_SIZE_Y
+        };
+        SDL_RenderCopy(renderer, zoom_image, NULL, &dest_zoom_rect);
+
+        SDL_RenderPresent(renderer);
     }
 
     cleanup:
