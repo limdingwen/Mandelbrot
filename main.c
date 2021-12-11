@@ -72,8 +72,9 @@ const struct color gradient_stops[GRADIENT_STOP_COUNT + 1] =
 #define INITIAL_SIZE (struct fp256){ SIGN_POS, { 2, 0, 0, 0 }} // 2
 #define SIZE_RATIO_X (struct fp256){ SIGN_POS, { 1, 0x8000000000000000, 0, 0 } } //1.5f
 
-#define PAN_SPEED 1
-#define ZOOM_SPEED 1
+//#define PAN_SPEED 1
+//#define ZOOM_SPEED 1
+#define COUNTER_TO_S (struct fp256){ SIGN_POS, { 0, 0x000000b2f4fc0794, 0x908cf232ff786259, 0x02416a7530755a66 } }
 
 enum state
 {
@@ -601,12 +602,12 @@ int main()
         exit_code = EX_OSERR;
         goto cleanup;
     }
-    //const uint8_t *keys = SDL_GetKeyboardState(NULL);
+    const uint8_t *keys = SDL_GetKeyboardState(NULL);
 
     bool running = true;
     uint64_t now = SDL_GetPerformanceCounter();
     uint64_t last = 0;
-    float dt = 0;
+    struct fp256 dt = { SIGN_ZERO, {0} };
 
     enum state state = STATE_PREVIEW;
     bool haveToRenderFull = true;
@@ -760,6 +761,13 @@ int main()
                 //if (keys[SDL_SCANCODE_R]) size -= size * ZOOM_SPEED * dt;
                 //if (keys[SDL_SCANCODE_F]) size += size * ZOOM_SPEED * dt;
 
+                if (keys[SDL_SCANCODE_W]) center_y = fp_sadd256(center_y, fp_smul256(size, dt));
+                if (keys[SDL_SCANCODE_A]) center_x = fp_ssub256(center_x, fp_smul256(size, dt));
+                if (keys[SDL_SCANCODE_S]) center_y = fp_ssub256(center_y, fp_smul256(size, dt));
+                if (keys[SDL_SCANCODE_D]) center_x = fp_sadd256(center_x, fp_smul256(size, dt));
+                if (keys[SDL_SCANCODE_R]) size = fp_ssub256(size, fp_smul256(size, dt));
+                if (keys[SDL_SCANCODE_F]) size = fp_sadd256(size, fp_smul256(size, dt));
+
                 // Render mandelbrot
                 // TODO: Only render when needed
 
@@ -824,8 +832,9 @@ int main()
 
                 last = now;
                 now = SDL_GetPerformanceCounter();
-                dt = (float)(now - last) / (float)SDL_GetPerformanceFrequency();
-                printf("Preview render completed. Time taken: %fms.\n", dt * 1000);
+                dt = fp_smul256(int_to_fp256((int)(now - last)), COUNTER_TO_S);
+                float msTaken = ((float)(now - last) / (float)SDL_GetPerformanceFrequency()) * 1000;
+                printf("Preview render completed. Time taken: %fms.\n", msTaken);
             }
             break;
         }
