@@ -11,6 +11,8 @@
 #define MAX_TITLE_LENGTH 256 
 #define WINDOW_WIDTH 900
 #define WINDOW_HEIGHT 600
+#define WINDOW_WIDTH_RECIPROCAL (struct fp256){ SIGN_POS,   { 0, 0x0048d159e26af37c, 0x048d159e26af37c0, 0x48d159e26af37c04 } }
+#define WINDOW_HEIGHT_RECIPROCAL  (struct fp256){ SIGN_POS, { 0, 0x006d3a06d3a06d3a, 0x06d3a06d3a06d3a0, 0x6d3a06d3a06d3a06 } }
 #define PIXELS_SIZE (WINDOW_WIDTH * WINDOW_HEIGHT * 4)
 #define THREADS 8
 #define SHOW_X_INTERVAL 5
@@ -18,6 +20,8 @@
 
 #define PREVIEW_WIDTH 240
 #define PREVIEW_HEIGHT 160
+#define PREVIEW_WIDTH_RECIPROCAL (struct fp256){ SIGN_POS,   { 0, 0x0111111111111111, 0x1111111111111111, 0x1111111111111111 } }
+#define PREVIEW_HEIGHT_RECIPROCAL  (struct fp256){ SIGN_POS, { 0, 0x0199999999999999, 0x9999999999999999, 0x9999999999999999 } }
 #define PREVIEW_X_SIZE 30
 #define SHOW_PREVIEW_WHEN_RENDERING 1
 
@@ -63,11 +67,10 @@ const struct color gradient_stops[GRADIENT_STOP_COUNT + 1] =
 #define ITERATIONS_M 2
 #define ITERATIONS_C 16
 
-#define INITIAL_CENTER_X -0.5f
-#define INITIAL_CENTER_Y 0
-#define INITIAL_SIZE 2
-#define SIZE_RATIO_X 1.5f
-#define SIZE_RATIO_Y 1
+#define INITIAL_CENTER_X (struct fp256){ SIGN_NEG, { 0, 0x8000000000000000, 0, 0 } } // -0.5f
+#define INITIAL_CENTER_Y (struct fp256){ SIGN_ZERO, {0} } // 0
+#define INITIAL_SIZE (struct fp256){ SIGN_POS, { 2, 0, 0, 0 }} // 2
+#define SIZE_RATIO_X (struct fp256){ SIGN_POS, { 1, 0x8000000000000000, 0, 0 } } //1.5f
 
 #define PAN_SPEED 1
 #define ZOOM_SPEED 1
@@ -283,6 +286,18 @@ struct fp256 fp_sadd256(struct fp256 a, struct fp256 b)
     }
 }
 
+struct fp256 fp_sinv256(struct fp256 a)
+{
+    if (a.sign == SIGN_POS) a.sign = SIGN_NEG;
+    if (a.sign == SIGN_NEG) a.sign = SIGN_POS;
+    return a;
+}
+
+struct fp256 fp_ssub256(struct fp256 a, struct fp256 b)
+{
+    return fp_sadd256(a, fp_sinv256(b));
+}
+
 struct fp256 fp_smul256(struct fp256 a, struct fp256 b)
 {
     if (a.sign == SIGN_ZERO || b.sign == SIGN_ZERO)
@@ -325,8 +340,44 @@ struct fp256 fp_smul256(struct fp256 a, struct fp256 b)
     return c256;
 }
 
+struct fp256 fp_ssqr256(struct fp256 a)
+{
+    return fp_smul256(a, a);
+}
+
+struct fp256 fp_asr256(struct fp256 a)
+{
+    a.man[3] >>= 1;
+    a.man[3] |= (a.man[2] & 0x1) << 63;
+    a.man[2] >>= 1;
+    a.man[2] |= (a.man[1] & 0x1) << 63;
+    a.man[1] >>= 1;
+    a.man[1] |= (a.man[0] & 0x1) << 63;
+    a.man[0] >>= 1;
+    return a;
+}
+
+struct fp256 int_to_fp256(int a)
+{
+    if (a == 0)
+        return (struct fp256){ SIGN_ZERO, {0} };
+    
+    struct fp256 b = {0};
+    if (a < 0)
+    {
+        b.sign = SIGN_NEG;
+        a = -a;
+    }
+    else
+        b.sign = SIGN_POS;
+    
+    b.man[0] = (uint64_t)a;
+    return b;
+}
+
 // Complex
 
+/*
 struct complex
 {
     double x;
@@ -352,6 +403,47 @@ double complex_sqrmag(struct complex a)
 {
     return a.x*a.x + a.y*a.y;
 }
+*/
+
+struct complex
+{
+    struct fp256 x;
+    struct fp256 y;
+};
+
+struct complex complex_add(struct complex a, struct complex b)
+{
+    return (struct complex) { fp_sadd256(a.x, b.x), fp_sadd256(a.x, b.x) };
+}
+
+struct complex complex_mul(struct complex a, struct complex b)
+{
+    return (struct complex)
+    {
+        fp_ssub256(fp_smul256(a.x, b.x), fp_smul256(a.y, b.y)),
+        fp_sadd256(fp_smul256(a.x, b.y), fp_smul256(b.x, a.y))
+    };
+}
+
+struct complex complex_sqr(struct complex a)
+{
+    return complex_mul(a, a);
+}
+
+// Only returns the whole number part
+uint64_t complex_sqrmag_whole(struct complex a)
+{
+    struct fp256 c = fp_sadd256(fp_ssqr256(a.x), fp_ssqr256(a.y));
+    return c.man[0];
+}
+
+// Thread
+
+struct fp256 calculateMathPos(int screen_pos, struct fp256 width_reciprocal, struct fp256 size, struct fp256 center)
+{
+    struct fp256 offset = fp_ssub256(center, fp_asr256(size));
+    return fp_sadd256(fp_smul256(fp_smul256(int_to_fp256(screen_pos), width_reciprocal), size), offset);
+}
 
 struct mb_result
 {
@@ -359,7 +451,18 @@ struct mb_result
     int escape_iterations;
 };
 
-// Thread
+struct mb_result process_mandelbrot(struct fp256 math_x, struct fp256 math_y, int iterations)
+{
+    struct complex c = { math_x, math_y };
+    struct complex z = { { SIGN_ZERO, {0} }, { SIGN_ZERO, {0} } };
+    for (int i = 0; i < iterations; i++)
+    {
+        z = complex_add(complex_sqr(z), c);
+        if (complex_sqrmag_whole(z) >= 4) // sqr(2), where 2 is "radius of escape"
+            return (struct mb_result) { false, i };
+    }
+    return (struct mb_result) { true, -1 };
+}
 
 struct thread_data
 {
@@ -369,43 +472,27 @@ struct thread_data
     int y_end;
     int width;
     int height;
-    double size;
-    double center_x;
-    double center_y;
+    struct fp256 width_reciprocal;
+    struct fp256 height_reciprocal;
+    struct fp256 size;
+    struct fp256 center_x;
+    struct fp256 center_y;
     int iterations;
     uint8_t *pixels;
 };
 
-double calculateMathPos(int screenPos, int screenWidth, double size, double center)
-{
-    double offset = center - size/2;
-    return (double)screenPos/(double)screenWidth*size + offset;
-}
-
-struct mb_result process_mandelbrot(double math_x, double math_y, int iterations)
-{
-    struct complex c = { math_x, math_y };
-    struct complex z = { 0, 0 };
-    for (int i = 0; i < iterations; i++)
-    {
-        z = complex_add(complex_sqr(z), c);
-        if (complex_sqrmag(z) > 4) // sqr(2), where 2 is "radius of escape"
-            return (struct mb_result) { false, i };
-    }
-    return (struct mb_result) { true, -1 };
-}
-
 void *thread(void *arg)
 {
     struct thread_data *data = (struct thread_data*)arg;
+    struct fp256 size_x = fp_smul256(data->size, SIZE_RATIO_X);
 
     for (int screen_x = data->x_start; screen_x <= data->x_end; screen_x++)
     {
-        double math_x = calculateMathPos(screen_x, data->width, data->size*SIZE_RATIO_X, data->center_x);
+        struct fp256 math_x = calculateMathPos(screen_x, data->width_reciprocal, size_x, data->center_x);
 
         for (int screen_y = data->y_start; screen_y <= data->y_end; screen_y++)
         {
-            double math_y = calculateMathPos(data->height - screen_y, data->height, data->size*SIZE_RATIO_Y, data->center_y);
+            struct fp256 math_y = calculateMathPos(data->height - screen_y, data->height_reciprocal, data->size, data->center_y);
             struct mb_result result = process_mandelbrot(math_x, math_y, data->iterations);
 
             struct color color;
@@ -419,7 +506,6 @@ void *thread(void *arg)
                     GRADIENT_ITERATION_SIZE,
                     gradient_stops
                 };
-
                 color = gradient_color(gradient, result.escape_iterations);
             }
             
@@ -439,9 +525,8 @@ int main()
 /*
     // Test bigfloat
 
-    struct fp256 a = { SIGN_ZERO, { 0, 0, 0, 50 } };
-    struct fp256 b = { SIGN_ZERO, { 0, 0, 0, 3 } };
-    struct fp256 c = fp_sadd256(a, b);
+    struct fp256 a = { SIGN_POS, { 4892, 123, 423, 4738 } };
+    struct fp256 c = fp_asr256(a);
     printf("c = ");
     if (c.sign == SIGN_NEG) printf("- ");
     for (int i = 0; i < 4; i++)
@@ -502,9 +587,9 @@ int main()
 
     // Main loop
 
-    double size = INITIAL_SIZE;
-    double center_x = INITIAL_CENTER_X;
-    double center_y = INITIAL_CENTER_Y;
+    struct fp256 size = INITIAL_SIZE;
+    struct fp256 center_x = INITIAL_CENTER_X;
+    struct fp256 center_y = INITIAL_CENTER_Y;
 
     stored_pixels = calloc(1, PIXELS_SIZE * sizeof(uint8_t));
     if (stored_pixels == NULL)
@@ -513,7 +598,7 @@ int main()
         exit_code = EX_OSERR;
         goto cleanup;
     }
-    const uint8_t *keys = SDL_GetKeyboardState(NULL);
+    //const uint8_t *keys = SDL_GetKeyboardState(NULL);
 
     bool running = true;
     uint64_t now = SDL_GetPerformanceCounter();
@@ -555,14 +640,15 @@ int main()
             }
         }
 
-        double iterations_x = -log10(size);
-        if (iterations_x < 0) iterations_x = 0;
-        double iterations_graph = ITERATIONS_M * iterations_x + ITERATIONS_C;
-        int iterations = (int)(iterations_graph * iterations_graph);
+        //double iterations_x = -log10(size);
+        //if (iterations_x < 0) iterations_x = 0;
+        //double iterations_graph = ITERATIONS_M * iterations_x + ITERATIONS_C;
+        //int iterations = (int)(iterations_graph * iterations_graph);
+        int iterations = 16;
 
-        char title_str[MAX_TITLE_LENGTH];
-        snprintf(title_str, MAX_TITLE_LENGTH, "X: %.17g, Y: %.17g, Size: %.17g, Iterations: %d", center_x, center_y, size, iterations);
-        SDL_SetWindowTitle(window, title_str);
+        //char title_str[MAX_TITLE_LENGTH];
+        //snprintf(title_str, MAX_TITLE_LENGTH, "X: %.17g, Y: %.17g, Size: %.17g, Iterations: %d", center_x, center_y, size, iterations);
+        //SDL_SetWindowTitle(window, title_str);
 
         switch (state)
         {
@@ -599,6 +685,8 @@ int main()
                                 thread_blocks[i].y_end,
                                 WINDOW_WIDTH,
                                 WINDOW_HEIGHT,
+                                WINDOW_WIDTH_RECIPROCAL,
+                                WINDOW_HEIGHT_RECIPROCAL,
                                 size,
                                 center_x,
                                 center_y,
@@ -662,12 +750,12 @@ int main()
 
             case STATE_PREVIEW:
             {
-                if (keys[SDL_SCANCODE_W]) center_y += size * PAN_SPEED * dt;
-                if (keys[SDL_SCANCODE_A]) center_x -= size * PAN_SPEED * dt;
-                if (keys[SDL_SCANCODE_S]) center_y -= size * PAN_SPEED * dt;
-                if (keys[SDL_SCANCODE_D]) center_x += size * PAN_SPEED * dt;
-                if (keys[SDL_SCANCODE_R]) size -= size * ZOOM_SPEED * dt;
-                if (keys[SDL_SCANCODE_F]) size += size * ZOOM_SPEED * dt;
+                //if (keys[SDL_SCANCODE_W]) center_y += size * PAN_SPEED * dt;
+                //if (keys[SDL_SCANCODE_A]) center_x -= size * PAN_SPEED * dt;
+                //if (keys[SDL_SCANCODE_S]) center_y -= size * PAN_SPEED * dt;
+                //if (keys[SDL_SCANCODE_D]) center_x += size * PAN_SPEED * dt;
+                //if (keys[SDL_SCANCODE_R]) size -= size * ZOOM_SPEED * dt;
+                //if (keys[SDL_SCANCODE_F]) size += size * ZOOM_SPEED * dt;
 
                 // Render mandelbrot
                 // TODO: Only render when needed
@@ -692,6 +780,8 @@ int main()
                         PREVIEW_HEIGHT,
                         PREVIEW_WIDTH,
                         PREVIEW_HEIGHT,
+                        PREVIEW_WIDTH_RECIPROCAL,
+                        PREVIEW_HEIGHT_RECIPROCAL,
                         size,
                         center_x,
                         center_y,

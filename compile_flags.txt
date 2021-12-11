@@ -1,0 +1,7 @@
+-Werror
+-Wall
+-Wextra
+-Wconversion
+-I/opt/homebrew/include
+-L/opt/homebrew/lib
+-lsdl2
