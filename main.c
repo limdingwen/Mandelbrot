@@ -9,10 +9,28 @@
 // TODO: Make movie
 // And of course, TODO: Make video (probably 2-parter).
 //
-// DEPENDENCIES
-// We depend on SDL2 and SDL2_image, both of which was downloaded from Homebrew
-// on the author's machine. Aside from that, we only depend on the stdlib,
-// as well as POSIX threads. C11 threads were not available on the author's Mac.
+// This program renders the mandelbrot set, which may be zoomed in via clicking.
+// It has two modes; preview and full-sized rendering. Both modes are nearly
+// identical except for the resolution in which they are rendered at. A special
+// function of this program is that it relies not on single or double precision
+// floats, but rather handmade "big floats". These big floats allow for
+// abitrarily precise math, but be warned as it is rather slow.
+//
+// As of writing, the big floats are limited at 256 bits, but may be expanded
+// in the future.
+//
+// I'm currently trying out using GPU for processing, as mandelbrot and other
+// fractal programs lends itself very well to parallel computing. We shall use
+// OpenCL for that, so let's include it here:
+
+#ifdef __APPLE__
+#include <OpenCL/opencl.h>
+#else
+#include <CL/cl.h>
+#endif
+
+// We depend on SDL2 and SDL2_image for rendering and windowing,
+// and of course the C stdlib.
 
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_image.h>
@@ -20,18 +38,10 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <stdbool.h>
-#include <pthread.h>
 #include <math.h>
 #include <assert.h>
 
 // RENDERING CONFIGURATION
-//
-// This version of the program has two modes; preview and full-sized rendering.
-// Both modes are nearly identical except for the resolution in which they are
-// rendered at. In an earlier version of this program, the preview mode was able
-// to run at 60fps, navigatable by keyboard. However, ever since the switch from
-// doubles to big floats, the program does not run fast enough to enjoy that
-// level of interactivity. As such, both modes operate on click-to-zoom.
 //
 // First, let's define some properties for full-sized rendering. We assume that
 // full-size is 1:1 to the window, and thus window size = full-size dimensions.
@@ -53,37 +63,6 @@
 
 #define FULL_SHOW_X_INTERVAL 5
 
-// We are going to render multicore, and the simplest way to do so is to divide
-// up fixed blocks of pixels for each core to render.
-
-#define THREADS 8
-
-struct thread_block
-{
-    int x_start;
-    int x_end;
-    int y_start;
-    int y_end;
-};
-
-const struct thread_block full_thread_blocks[THREADS] =
-{
-    { 0, 224, 0, 299 },
-    { 225, 449, 0, 299 },
-    { 450, 674, 0, 299 },
-    { 675, 899, 0, 299 },
-    { 0, 224, 300, 599 },
-    { 225, 449, 300, 599 },
-    { 450, 674, 300, 599 },
-    { 675, 899, 300, 599 },
-};
-
-// Since this is multicore, the program must be able to know how many columns
-// it should render for each block; it can't just loop through the entire
-// window.
-
-#define FULL_THREAD_X_SIZE 225
-
 // When switching from preview to full-mode rendering, the user might want to
 // see a black screen so the progress of the render might be easier to see,
 // or they might want to see the preview behind the partly-done full-mode render
@@ -100,19 +79,6 @@ const struct thread_block full_thread_blocks[THREADS] =
 #define PREVIEW_WIDTH_RECIPROCAL (struct fp256){ SIGN_POS,  { 0, 0x0111111111111111, 0x1111111111111111, 0x1111111111111111 } }
 #define PREVIEW_HEIGHT_RECIPROCAL (struct fp256){ SIGN_POS, { 0, 0x0199999999999999, 0x9999999999999999, 0x9999999999999999 } }
 #define PREVIEW_SHOW_X_INTERVAL 5
-#define PREVIEW_THREAD_X_SIZE 60
-
-const struct thread_block preview_thread_blocks[THREADS] =
-{
-    { 0, 59, 0, 79 },
-    { 60, 119, 0, 79, },
-    { 120, 179, 0, 79 },
-    { 180, 239, 0, 79 },
-    { 0, 59, 80, 159 },
-    { 60, 119, 80, 159, },
-    { 120, 179, 80, 159 },
-    { 180, 239, 80, 159 },
-};
 
 // GRADIENT CONFIGURATION
 //
@@ -229,379 +195,109 @@ struct color gradient_color(struct gradient gradient, int x)
     float stop_x = (float)x / (float)gradient.size * (float)gradient.stop_count - (float)stop_prev;
     return color_lerp(gradient.stops[stop_prev], gradient.stops[stop_next], stop_x);
 }
-
-// BigFloat
-
-enum sign
-{
-    SIGN_NEG,
-    SIGN_ZERO,
-    SIGN_POS
-};
-
-struct fp256
-{
-    enum sign sign;
-    uint64_t man[4];
-};
-
-struct fp512
-{
-    enum sign sign;
-    uint64_t man[8];
-};
-
-#define DEF_FP_UADDSUB256(name, op, opc) struct fp256 fp_u##name##256(struct fp256 a, struct fp256 b) \
-{ \
-    struct fp256 c; \
-    asm(#op  "S %3, %7, %11\n" \
-        #opc "S %2, %6, %10\n" \
-        #opc "S %1, %5, %9\n" \
-        #opc "  %0, %4, %8" \
-        : \
-        "=&r"(c.man[0]), /* 0 */ \
-        "=&r"(c.man[1]), /* 1 */ \
-        "=&r"(c.man[2]), /* 2 */ \
-        "=&r"(c.man[3])  /* 3 */ \
-        : \
-        "r"  (a.man[0]), /* 4 */ \
-        "r"  (a.man[1]), /* 5 */ \
-        "r"  (a.man[2]), /* 6 */ \
-        "r"  (a.man[3]), /* 7 */ \
-        "r"  (b.man[0]), /* 8 */ \
-        "r"  (b.man[1]), /* 9 */ \
-        "r"  (b.man[2]), /* 10 */ \
-        "r"  (b.man[3])  /* 11 */ \
-        : \
-        "cc"); \
-    return c; \
-}
-DEF_FP_UADDSUB256(add, ADD, ADC);
-// Note: a > b must be true if using sub, except if for comparing.
-DEF_FP_UADDSUB256(sub, SUB, SBC);
-#undef DEF_FP_UADDSUB256
-
-struct fp512 fp_uadd512(struct fp512 a, struct fp512 b)
-{
-    struct fp512 c;
-    asm("ADDS %7, %15, %23\n"
-        "ADCS %6, %14, %22\n"
-        "ADCS %5, %13, %21\n"
-        "ADCS %4, %12, %20\n"
-        "ADCS %3, %11, %19\n"
-        "ADCS %2, %10, %18\n"
-        "ADCS %1, %9, %17\n"
-        "ADC  %0, %8, %16"
-        :
-        "=&r"(c.man[0]), // 0
-        "=&r"(c.man[1]), // 1
-        "=&r"(c.man[2]), // 2
-        "=&r"(c.man[3]), // 3
-        "=&r"(c.man[4]), // 4
-        "=&r"(c.man[5]), // 5
-        "=&r"(c.man[6]), // 6
-        "=&r"(c.man[7])  // 7
-        :
-        "r"  (a.man[0]), // 8
-        "r"  (a.man[1]), // 9
-        "r"  (a.man[2]), // 10
-        "r"  (a.man[3]), // 11
-        "r"  (a.man[4]), // 12
-        "r"  (a.man[5]), // 13
-        "r"  (a.man[6]), // 14
-        "r"  (a.man[7]), // 15
-        "r"  (b.man[0]), // 16
-        "r"  (b.man[1]), // 17
-        "r"  (b.man[2]), // 18
-        "r"  (b.man[3]), // 19
-        "r"  (b.man[4]), // 20
-        "r"  (b.man[5]), // 21
-        "r"  (b.man[6]), // 22
-        "r"  (b.man[7])  // 23
-        :
-        "cc");
-    return c;
-}
-
-enum cmp
-{
-    CMP_SAME,
-    CMP_A_BIG,
-    CMP_B_BIG
-};
-
-enum cmp fp_ucmp256(struct fp256 a, struct fp256 b)
-{
-    static const uint64_t zero[4]; // static is 0 by default
-    struct fp256 c = fp_usub256(a, b);
-    bool is_negative = (c.man[0] >> 63) == 1;
-    if (is_negative)
-        return CMP_B_BIG;
-    else
-        if (memcmp(c.man, zero, 4 * sizeof(uint64_t)) == 0)
-            return CMP_SAME;
-        else
-            return CMP_A_BIG;
-}
-
-struct fp256 fp_sadd256(struct fp256 a, struct fp256 b)
-{
-    if (a.sign == SIGN_ZERO && b.sign == SIGN_ZERO)
-        return a;
-    if (b.sign == SIGN_ZERO)
-        return a;
-    if (a.sign == SIGN_ZERO)
-        return b;
-    if ((a.sign == SIGN_POS && b.sign == SIGN_POS) ||
-        (a.sign == SIGN_NEG && b.sign == SIGN_NEG))
-    {
-        struct fp256 c = fp_uadd256(a, b);
-        c.sign = a.sign;
-        return c;
-    }
-
-    assert((a.sign == SIGN_POS && b.sign == SIGN_NEG) ||
-           (a.sign == SIGN_NEG && b.sign == SIGN_POS));
-    enum cmp cmp = fp_ucmp256(a, b);
-    if (cmp == CMP_SAME)
-        return (struct fp256) { SIGN_ZERO, {0} };
-    
-    if (a.sign == SIGN_POS && b.sign == SIGN_NEG)
-    {
-        if (cmp == CMP_A_BIG)
-        {
-            struct fp256 c = fp_usub256(a, b);
-            c.sign = SIGN_POS;
-            return c;
-        }
-        else
-        {
-            struct fp256 c = fp_usub256(b, a);
-            c.sign = SIGN_NEG;
-            return c;
-        }
-    }
-    else
-    {
-        if (cmp == CMP_A_BIG)
-        {
-            struct fp256 c = fp_usub256(a, b);
-            c.sign = SIGN_NEG;
-            return c;
-        }
-        else
-        {
-            struct fp256 c = fp_usub256(b, a);
-            c.sign = SIGN_POS;
-            return c;
-        }
-    }
-}
-
-struct fp256 fp_sinv256(struct fp256 a)
-{
-    if (a.sign == SIGN_POS) a.sign = SIGN_NEG;
-    else if (a.sign == SIGN_NEG) a.sign = SIGN_POS;
-    return a;
-}
-
-struct fp256 fp_ssub256(struct fp256 a, struct fp256 b)
-{
-    return fp_sadd256(a, fp_sinv256(b));
-}
-
-struct fp256 fp_smul256(struct fp256 a, struct fp256 b)
-{
-    if (a.sign == SIGN_ZERO || b.sign == SIGN_ZERO)
-        return (struct fp256) { SIGN_ZERO, {0} };
-
-    enum sign sign;
-    if (a.sign == SIGN_NEG && b.sign == SIGN_NEG)
-        sign = SIGN_POS;
-    else if (a.sign == SIGN_NEG || b.sign == SIGN_NEG)
-        sign = SIGN_NEG;
-    else
-        sign = SIGN_POS;
-
-    struct fp512 c = {0};
-    for (int i = 3; i >= 0; i--) // a
-    {
-        for (int j = 3; j >= 0; j--) // b
-        {
-            int low_offset = 7 - (3 - i) - (3 - j);
-            assert(low_offset >= 1);
-            int high_offset = low_offset - 1;
-
-            __uint128_t mult = (__uint128_t)a.man[i] * (__uint128_t)b.man[j];
-            struct fp512 temp = {0};
-            temp.man[low_offset] = (uint64_t)mult;
-            temp.man[high_offset] = mult >> 64;
-
-            c = fp_uadd512(c, temp);
-        }
-    }
-
-    struct fp256 c256;
-    c256.sign = sign;
-    memcpy(c256.man, c.man + 1, 4 * sizeof(uint64_t));
-
-    return c256;
-}
-
-struct fp256 fp_ssqr256(struct fp256 a)
-{
-    return fp_smul256(a, a);
-}
-
-struct fp256 fp_asr256(struct fp256 a)
-{
-    a.man[3] >>= 1;
-    a.man[3] |= (a.man[2] & 0x1) << 63;
-    a.man[2] >>= 1;
-    a.man[2] |= (a.man[1] & 0x1) << 63;
-    a.man[1] >>= 1;
-    a.man[1] |= (a.man[0] & 0x1) << 63;
-    a.man[0] >>= 1;
-    return a;
-}
-
-struct fp256 int_to_fp256(int a)
-{
-    if (a == 0)
-        return (struct fp256){ SIGN_ZERO, {0} };
-    
-    struct fp256 b = {0};
-    if (a < 0)
-    {
-        b.sign = SIGN_NEG;
-        a = -a;
-    }
-    else
-        b.sign = SIGN_POS;
-    
-    b.man[0] = (uint64_t)a;
-    return b;
-}
-
-// Complex
-
-struct complex
-{
-    struct fp256 x;
-    struct fp256 y;
-};
-
-struct complex complex_add(struct complex a, struct complex b)
-{
-    return (struct complex) { fp_sadd256(a.x, b.x), fp_sadd256(a.y, b.y) };
-}
-
-struct complex complex_mul(struct complex a, struct complex b)
-{
-    return (struct complex)
-    {
-        fp_ssub256(fp_smul256(a.x, b.x), fp_smul256(a.y, b.y)),
-        fp_sadd256(fp_smul256(a.x, b.y), fp_smul256(b.x, a.y))
-    };
-}
-
-struct complex complex_sqr(struct complex a)
-{
-    return complex_mul(a, a);
-}
-
-// Only returns the whole number part
-uint64_t complex_sqrmag_whole(struct complex a)
-{
-    struct fp256 c = fp_sadd256(fp_ssqr256(a.x), fp_ssqr256(a.y));
-    return c.man[0];
-}
-
-// Thread
-
-struct fp256 calculateMathPos(int screen_pos, struct fp256 width_reciprocal, struct fp256 size, struct fp256 center)
-{
-    struct fp256 offset = fp_ssub256(center, fp_asr256(size));
-    return fp_sadd256(fp_smul256(fp_smul256(int_to_fp256(screen_pos), width_reciprocal), size), offset);
-}
-
-struct mb_result
-{
-    bool is_in_set;
-    unsigned long long escape_iterations;
-};
-
-struct mb_result process_mandelbrot(struct fp256 math_x, struct fp256 math_y, unsigned long long iterations)
-{
-    struct complex c = { math_x, math_y };
-    struct complex z = { { SIGN_ZERO, {0} }, { SIGN_ZERO, {0} } };
-    for (unsigned long long i = 0; i < iterations; i++)
-    {
-        z = complex_add(complex_sqr(z), c);
-        if (complex_sqrmag_whole(z) >= 4) // sqr(2), where 2 is "radius of escape"
-            return (struct mb_result) { false, i };
-    }
-    return (struct mb_result) { true, -1ULL };
-}
-
-struct thread_data
-{
-    int x_start;
-    int x_end;
-    int y_start;
-    int y_end;
-    int width;
-    int height;
-    struct fp256 width_reciprocal;
-    struct fp256 height_reciprocal;
-    struct fp256 size;
-    struct fp256 center_x;
-    struct fp256 center_y;
-    unsigned long long iterations;
-    uint8_t *pixels;
-};
-
-void *thread(void *arg)
-{
-    struct thread_data *data = (struct thread_data*)arg;
-    struct fp256 size_x = fp_smul256(data->size, SIZE_RATIO_X);
-
-    for (int screen_x = data->x_start; screen_x <= data->x_end; screen_x++)
-    {
-        struct fp256 math_x = calculateMathPos(screen_x, data->width_reciprocal, size_x, data->center_x);
-
-        for (int screen_y = data->y_start; screen_y <= data->y_end; screen_y++)
-        {
-            struct fp256 math_y = calculateMathPos(data->height - screen_y, data->height_reciprocal, data->size, data->center_y);
-            struct mb_result result = process_mandelbrot(math_x, math_y, data->iterations);
-
-            struct color color;
-            if (result.is_in_set)
-                color = (struct color){ 0, 0, 0 };
-            else
-            {
-                const static struct gradient gradient =
-                {
-                    GRADIENT_STOP_COUNT,
-                    GRADIENT_ITERATION_SIZE,
-                    gradient_stops
-                };
-                color = gradient_color(gradient, (int)result.escape_iterations); // TODO: If got problems, make this unsigned long long
-            }
-            
-            int r_offset = (screen_y*data->width + screen_x)*4;
-            data->pixels[r_offset + 0] = (uint8_t) color.r;
-            data->pixels[r_offset + 1] = (uint8_t) color.g;
-            data->pixels[r_offset + 2] = (uint8_t) color.b;
-            data->pixels[r_offset + 3] = 255;
-        }
-    }
-
-    pthread_exit(NULL);
-}
+#define MAX_KERNEL_SRC_SIZE 0x100000
+#define KERNEL_SRC_PATH "test.cl"
 
 int main()
 {
+    // Create the two input vectors
+    int i;
+    const int LIST_SIZE = 1024;
+    int *A = (int*)malloc(sizeof(int)*LIST_SIZE);
+    int *B = (int*)malloc(sizeof(int)*LIST_SIZE);
+    for(i = 0; i < LIST_SIZE; i++) {
+        A[i] = i;
+        B[i] = LIST_SIZE - i;
+    }
+ 
+    // Load the kernel source code into the array source_str
+    FILE *fp;
+    char *source_str;
+    size_t source_size;
+ 
+    fp = fopen(KERNEL_SRC_PATH, "r");
+    if (!fp) {
+        fprintf(stderr, "Failed to load kernel.\n");
+        exit(1);
+    }
+    source_str = (char*)malloc(MAX_KERNEL_SRC_SIZE);
+    source_size = fread( source_str, 1, MAX_KERNEL_SRC_SIZE, fp);
+    fclose( fp );
+ 
+    // Get platform and device information
+    cl_platform_id platform_id = NULL;
+    cl_device_id device_id = NULL;   
+    cl_uint ret_num_devices;
+    cl_uint ret_num_platforms;
+    cl_int ret = clGetPlatformIDs(1, &platform_id, &ret_num_platforms);
+    ret = clGetDeviceIDs( platform_id, CL_DEVICE_TYPE_DEFAULT, 1, 
+            &device_id, &ret_num_devices);
+ 
+    // Create an OpenCL context
+    cl_context context = clCreateContext( NULL, 1, &device_id, NULL, NULL, &ret);
+ 
+    // Create a command queue
+    cl_command_queue command_queue = clCreateCommandQueue(context, device_id, 0, &ret);
+ 
+    // Create memory buffers on the device for each vector 
+    cl_mem a_mem_obj = clCreateBuffer(context, CL_MEM_READ_ONLY, 
+            LIST_SIZE * sizeof(int), NULL, &ret);
+    cl_mem b_mem_obj = clCreateBuffer(context, CL_MEM_READ_ONLY,
+            LIST_SIZE * sizeof(int), NULL, &ret);
+    cl_mem c_mem_obj = clCreateBuffer(context, CL_MEM_WRITE_ONLY, 
+            LIST_SIZE * sizeof(int), NULL, &ret);
+ 
+    // Copy the lists A and B to their respective memory buffers
+    ret = clEnqueueWriteBuffer(command_queue, a_mem_obj, CL_TRUE, 0,
+            LIST_SIZE * sizeof(int), A, 0, NULL, NULL);
+    ret = clEnqueueWriteBuffer(command_queue, b_mem_obj, CL_TRUE, 0, 
+            LIST_SIZE * sizeof(int), B, 0, NULL, NULL);
+ 
+    // Create a program from the kernel source
+    cl_program program = clCreateProgramWithSource(context, 1, 
+            (const char **)&source_str, (const size_t *)&source_size, &ret);
+ 
+    // Build the program
+    ret = clBuildProgram(program, 1, &device_id, NULL, NULL, NULL);
+ 
+    // Create the OpenCL kernel
+    cl_kernel kernel = clCreateKernel(program, "vector_add", &ret);
+ 
+    // Set the arguments of the kernel
+    ret = clSetKernelArg(kernel, 0, sizeof(cl_mem), (void *)&a_mem_obj);
+    ret = clSetKernelArg(kernel, 1, sizeof(cl_mem), (void *)&b_mem_obj);
+    ret = clSetKernelArg(kernel, 2, sizeof(cl_mem), (void *)&c_mem_obj);
+ 
+    // Execute the OpenCL kernel on the list
+    size_t global_item_size = LIST_SIZE; // Process the entire lists
+    size_t local_item_size = 64; // Divide work items into groups of 64
+    ret = clEnqueueNDRangeKernel(command_queue, kernel, 1, NULL, 
+            &global_item_size, &local_item_size, 0, NULL, NULL);
+ 
+    // Read the memory buffer C on the device to the local variable C
+    int *C = (int*)malloc(sizeof(int)*LIST_SIZE);
+    ret = clEnqueueReadBuffer(command_queue, c_mem_obj, CL_TRUE, 0, 
+            LIST_SIZE * sizeof(int), C, 0, NULL, NULL);
+ 
+    // Display the result to the screen
+    for(i = 0; i < LIST_SIZE; i++)
+        printf("%d + %d = %d\n", A[i], B[i], C[i]);
+ 
+    // Clean up
+    ret = clFlush(command_queue);
+    ret = clFinish(command_queue);
+    ret = clReleaseKernel(kernel);
+    ret = clReleaseProgram(program);
+    ret = clReleaseMemObject(a_mem_obj);
+    ret = clReleaseMemObject(b_mem_obj);
+    ret = clReleaseMemObject(c_mem_obj);
+    ret = clReleaseCommandQueue(command_queue);
+    ret = clReleaseContext(context);
+    free(A);
+    free(B);
+    free(C);
+    return 0;
+
     int err;
     int exit_code = EXIT_SUCCESS;
 
@@ -957,4 +653,5 @@ int main()
     SDL_Quit();
 
     return exit_code;
+*/
 }
