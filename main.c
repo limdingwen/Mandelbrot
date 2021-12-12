@@ -5,11 +5,14 @@
 //
 // TODO: Better colouring
 // TODO: Better iteration calculation
-// TODO: Optimise
+// TODO: Optimise (OpenCL?)
 // TODO: Make movie
 // And of course, TODO: Make video (probably 2-parter).
-// FIXME: When in full mode, clicking shows old preview data. Maybe fix by clearing screen first?
 //
+// DEPENDENCIES
+// We depend on SDL2 and SDL2_image, both of which was downloaded from Homebrew
+// on the author's machine. Aside from that, we only depend on the stdlib,
+// as well as POSIX threads. C11 threads were not available on the author's Mac.
 
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_image.h>
@@ -21,36 +24,37 @@
 #include <math.h>
 #include <assert.h>
 
-// CONFIGURATION AND OUTLINE
+// RENDERING CONFIGURATION
 //
 // This version of the program has two modes; preview and full-sized rendering.
 // Both modes are nearly identical except for the resolution in which they are
 // rendered at. In an earlier version of this program, the preview mode was able
-// to run at 60fps, navigatable by keyboard. Howver, ever since the switch from
+// to run at 60fps, navigatable by keyboard. However, ever since the switch from
 // doubles to big floats, the program does not run fast enough to enjoy that
 // level of interactivity. As such, both modes operate on click-to-zoom.
 //
-// First, let's define some configur
+// First, let's define some properties for full-sized rendering. We assume that
+// full-size is 1:1 to the window, and thus window size = full-size dimensions.
 
 #define WINDOW_WIDTH 900
 #define WINDOW_HEIGHT 600
+
+// Here, we also define reciprocals (1/x) of the width and height, as our big
+// float implementation is currently unable to divide; only multiply. We will
+// elaborate on the big float implementation later. Currently, this represents
+// the raw hexadecimal value of the big float as converting from a decimal
+// value is too difficult.
+
 #define WINDOW_WIDTH_RECIPROCAL (struct fp256){ SIGN_POS,   { 0, 0x0048d159e26af37c, 0x048d159e26af37c0, 0x48d159e26af37c04 } }
 #define WINDOW_HEIGHT_RECIPROCAL (struct fp256){ SIGN_POS,  { 0, 0x006d3a06d3a06d3a, 0x06d3a06d3a06d3a0, 0x6d3a06d3a06d3a06 } }
-#define FULL_PIXELS_SIZE (WINDOW_WIDTH * WINDOW_HEIGHT * 4)
+
+// This defines how many columns of pixels we draw before presenting a frame
+// to the user. Doing this after too little columns results in slower rendering.
+
 #define FULL_SHOW_X_INTERVAL 5
-#define FULL_THREAD_X_SIZE 225
 
-#define MAX_TITLE_LENGTH 256 
-
-#define PREVIEW_WIDTH 240
-#define PREVIEW_HEIGHT 160
-#define PREVIEW_WIDTH_RECIPROCAL (struct fp256){ SIGN_POS,  { 0, 0x0111111111111111, 0x1111111111111111, 0x1111111111111111 } }
-#define PREVIEW_HEIGHT_RECIPROCAL (struct fp256){ SIGN_POS, { 0, 0x0199999999999999, 0x9999999999999999, 0x9999999999999999 } }
-#define PREVIEW_PIXELS_SIZE (PREVIEW_WIDTH * PREVIEW_HEIGHT * 4)
-#define PREVIEW_SHOW_X_INTERVAL 5
-#define PREVIEW_THREAD_X_SIZE 60
-
-#define SHOW_PREVIEW_WHEN_RENDERING 1
+// We are going to render multicore, and the simplest way to do so is to divide
+// up fixed blocks of pixels for each core to render.
 
 #define THREADS 8
 
@@ -74,6 +78,30 @@ const struct thread_block full_thread_blocks[THREADS] =
     { 675, 899, 300, 599 },
 };
 
+// Since this is multicore, the program must be able to know how many columns
+// it should render for each block; it can't just loop through the entire
+// window.
+
+#define FULL_THREAD_X_SIZE 225
+
+// When switching from preview to full-mode rendering, the user might want to
+// see a black screen so the progress of the render might be easier to see,
+// or they might want to see the preview behind the partly-done full-mode render
+// so the image progressively looks clearer.
+
+#define SHOW_PREVIEW_WHEN_RENDERING 1
+
+// Next, we define the same rendering settings, but for the preview mode. The
+// preview mode differs in that it is much smaller and faster to render, but
+// is almost identical in every other way.
+
+#define PREVIEW_WIDTH 240
+#define PREVIEW_HEIGHT 160
+#define PREVIEW_WIDTH_RECIPROCAL (struct fp256){ SIGN_POS,  { 0, 0x0111111111111111, 0x1111111111111111, 0x1111111111111111 } }
+#define PREVIEW_HEIGHT_RECIPROCAL (struct fp256){ SIGN_POS, { 0, 0x0199999999999999, 0x9999999999999999, 0x9999999999999999 } }
+#define PREVIEW_SHOW_X_INTERVAL 5
+#define PREVIEW_THREAD_X_SIZE 60
+
 const struct thread_block preview_thread_blocks[THREADS] =
 {
     { 0, 59, 0, 79 },
@@ -86,8 +114,20 @@ const struct thread_block preview_thread_blocks[THREADS] =
     { 180, 239, 80, 159 },
 };
 
-#define GRADIENT_STOP_COUNT 4
+// GRADIENT CONFIGURATION
+//
+// Next, we'll define the color gradient for all the diverging values of the
+// mandelbrot set. The gradient is set to loop for every GRADIENT_ITERATION_SIZE
+// number of iterations. Since the program will use modulus to loop the
+// gradient, using a power-of-two number hopefully triggers the compiler
+// optimiser to use a mask instead. This is important since gradient is
+// calculated for every pixel on the screen.
+
 #define GRADIENT_ITERATION_SIZE 64 // Use 2^x for best performance
+
+// Next, we define the actual gradient, in 0-255 RGB format. We also duplicate
+// the first and last stops, so that it will be easier for the program to loop
+// it later on, as you will see.
 
 struct color
 {
@@ -96,6 +136,7 @@ struct color
     float b;
 };
 
+#define GRADIENT_STOP_COUNT 4
 const struct color gradient_stops[GRADIENT_STOP_COUNT + 1] =
 {
     { 0, 0, 255 },
@@ -105,27 +146,49 @@ const struct color gradient_stops[GRADIENT_STOP_COUNT + 1] =
     { 0, 0, 255 }, // For looping
 };
 
-#define ITERATIONS_M 2
-#define ITERATIONS_C 16
+// OTHER CONFIGURATION
+//
+// First, the initial center and size of the view. Size represents the length
+// of the visible Y axis, while the X axis may be derived by multiplying by
+// SIZE_RATIO_X. This ratio may be derived using WINDOW_WIDTH / WINDOW_HEIGHT.
 
-#define INITIAL_CENTER_X (struct fp256){ SIGN_NEG, { 0, 0x8000000000000000, 0, 0 } } // -0.5f
+#define INITIAL_CENTER_X (struct fp256){ SIGN_NEG, { 0, 0x8000000000000000, 0, 0 } } // -0.5
 #define INITIAL_CENTER_Y (struct fp256){ SIGN_ZERO, {0} } // 0
 #define INITIAL_SIZE (struct fp256){ SIGN_POS, { 2, 0, 0, 0 }} // 2
-#define SIZE_RATIO_X (struct fp256){ SIGN_POS, { 1, 0x8000000000000000, 0, 0 } } // 1.5f
+#define SIZE_RATIO_X (struct fp256){ SIGN_POS, { 1, 0x8000000000000000, 0, 0 } } // 1.5
+
+// The program uses a click-to-zoom mechanic, and thus we need to show the user
+// an image so the user knows where they will be zooming into. As with all
+// resources, the image may be found in the same folder as the executable.
 
 #define ZOOM_IMAGE_PATH "zoom.png"
-#define ZOOM_IMAGE_SIZE_X 225
-#define ZOOM_IMAGE_SIZE_Y 150
-#define ZOOM (struct fp256){ SIGN_POS, { 0, 0x4000000000000000, 0, 0 } } // 0.25f
+
+// Here, we may configure how much zoom we want to apply per click; it shall be
+// calculated as size *= ZOOM when zooming in, and size /= ZOOM when zooming
+// out. For instance, a zoom of 0.25 will zoom the user in by 4x every click.
+// The zoom should divide WINDOW_WIDTH and WINDOW_HEIGHT, as we shall soon see.
+
+#define ZOOM (struct fp256){ SIGN_POS, { 0, 0x4000000000000000, 0, 0 } } // 0.25
 #define ZOOM_RECIPROCAL (struct fp256){ SIGN_POS, { 4, 0, 0, 0 } }
 
-enum state
-{
-    STATE_PREVIEW,
-    STATE_FULL
-};
+// Here, we define not the size of the image as seen on disk, but rather how big
+// the image should be when rendered on screen. It should be obvious now why
+// ZOOM should divide the width and height; it is so that we may have nice
+// values for the zoom image, such as WINDOW_WIDTH / 4 and WINDOW_HEIGHT / 4.
 
-// Color
+#define ZOOM_IMAGE_SIZE_X 225
+#define ZOOM_IMAGE_SIZE_Y 150
+
+// Finally, for efficiency sake, we'll use a fixed length for the title string.
+
+#define MAX_TITLE_LENGTH 256 
+
+// GRADIENT IMPLEMENTATION
+//
+// We have already defined the structure of color in GRADIENT CONFIGURATION,
+// as it was needed at the time. Here, we shall define a trivial function for
+// lerping between two colors, for the gradient to use. We also clamp x so that
+// colors may not end up as more than 255 or less than 0.
 
 struct color color_lerp(struct color a, struct color b, float x)
 {
@@ -139,6 +202,10 @@ struct color color_lerp(struct color a, struct color b, float x)
     };
 }
 
+// We use a gradient struct instead of the configuration seen above so we do not
+// tie our implementation to this source file. Rather, any caller may pass in
+// any gradient configuration to our function.
+
 struct gradient
 {
     int stop_count;
@@ -146,9 +213,17 @@ struct gradient
     const struct color *stops;
 };
 
+// For a particular point on a looping gradient, return a color.
+
 struct color gradient_color(struct gradient gradient, int x)
 {
+
+// As said before, first we perform a modulus on x so to make the gradient loop.
+
     x %= gradient.size;
+
+// 
+
     int stop_prev = (int)((float)x / (float)gradient.size * (float)gradient.stop_count);
     int stop_next = stop_prev + 1;
     float stop_x = (float)x / (float)gradient.size * (float)gradient.stop_count - (float)stop_prev;
@@ -600,8 +675,11 @@ int main()
     struct fp256 center_y = INITIAL_CENTER_Y;
     unsigned long long iterations = 32;
 
-    full_stored_pixels = calloc(1, FULL_PIXELS_SIZE * sizeof(uint8_t));
-    preview_stored_pixels = calloc(1, PREVIEW_PIXELS_SIZE * sizeof(uint8_t));
+    static const int full_pixels_size = WINDOW_WIDTH * WINDOW_HEIGHT * 4;
+    static const int preview_pixels_size = PREVIEW_WIDTH * PREVIEW_HEIGHT * 4;
+
+    full_stored_pixels = calloc(1, full_pixels_size * sizeof(uint8_t));
+    preview_stored_pixels = calloc(1, preview_pixels_size * sizeof(uint8_t));
     if (full_stored_pixels == NULL || preview_stored_pixels == NULL)
     {
         fputs("Unable to allocate memory for storing pixels.", stderr);
@@ -609,6 +687,11 @@ int main()
         goto cleanup;
     }
 
+    enum state
+    {
+        STATE_PREVIEW,
+        STATE_FULL
+    };
     enum state state = STATE_PREVIEW;
     bool haveToRender = true;
 
@@ -645,9 +728,9 @@ int main()
 
                             haveToRender = true;
                             if (state == STATE_FULL)
-                                memset(full_stored_pixels, 0, FULL_PIXELS_SIZE);
+                                memset(full_stored_pixels, 0, full_pixels_size);
                             else if (state == STATE_PREVIEW)
-                                memset(preview_stored_pixels, 0, PREVIEW_PIXELS_SIZE);
+                                memset(preview_stored_pixels, 0, preview_pixels_size);
                         }
                         break;
 
@@ -657,6 +740,7 @@ int main()
                             center_x = INITIAL_CENTER_X;
                             center_y = INITIAL_CENTER_Y;
                             size = INITIAL_SIZE;
+                            iterations = 32;
                             // Not doing memset is intended, for the visual effect.
                         }
                         break;
@@ -676,17 +760,17 @@ int main()
                         center_x = calculateMathPos(mouse_x, WINDOW_WIDTH_RECIPROCAL, size_x, center_x);
                         center_y = calculateMathPos(WINDOW_HEIGHT - mouse_y, WINDOW_HEIGHT_RECIPROCAL, size, center_y);
                         size = fp_smul256(size, ZOOM);
-                        iterations *= 2; // TODO: Less hardcoded
-                        memset(full_stored_pixels, 0, FULL_PIXELS_SIZE);
-                        memset(preview_stored_pixels, 0, PREVIEW_PIXELS_SIZE);
+                        iterations += 64; // TODO: Less hardcoded
+                        memset(full_stored_pixels, 0, full_pixels_size);
+                        memset(preview_stored_pixels, 0, preview_pixels_size);
                     }
                     else if (event.button.button == SDL_BUTTON_RIGHT)
                     {
                         haveToRender = true;
                         size = fp_smul256(size, ZOOM_RECIPROCAL);
-                        iterations /= 2;
-                        memset(full_stored_pixels, 0, FULL_PIXELS_SIZE);
-                        memset(preview_stored_pixels, 0, PREVIEW_PIXELS_SIZE);
+                        iterations -= 64;
+                        memset(full_stored_pixels, 0, full_pixels_size);
+                        memset(preview_stored_pixels, 0, preview_pixels_size);
                     }
                 }
                 break;
@@ -709,40 +793,34 @@ int main()
 
             int thread_x_size;
             int show_x_interval;
-            SDL_Texture *texture;
             const struct thread_block *thread_blocks;
             int width;
             int height;
             struct fp256 width_reciprocal;
             struct fp256 height_reciprocal;
             uint8_t *stored_pixels;
-            int pixels_size;
 
             if (state == STATE_PREVIEW)
             {
                 thread_x_size =  PREVIEW_THREAD_X_SIZE;
                 show_x_interval = PREVIEW_SHOW_X_INTERVAL;
-                texture = preview_texture;
                 thread_blocks = preview_thread_blocks;
                 width = PREVIEW_WIDTH;
                 height = PREVIEW_HEIGHT;
                 width_reciprocal = PREVIEW_WIDTH_RECIPROCAL;
                 height_reciprocal = PREVIEW_HEIGHT_RECIPROCAL;
                 stored_pixels = preview_stored_pixels;
-                pixels_size = PREVIEW_PIXELS_SIZE;
             }
             else if (state == STATE_FULL)
             {
                 thread_x_size =  FULL_THREAD_X_SIZE;
                 show_x_interval = FULL_SHOW_X_INTERVAL;
-                texture = full_texture;
                 thread_blocks = full_thread_blocks;
                 width = WINDOW_WIDTH;
                 height = WINDOW_HEIGHT;
                 width_reciprocal = WINDOW_WIDTH_RECIPROCAL;
                 height_reciprocal = WINDOW_HEIGHT_RECIPROCAL;
                 stored_pixels = full_stored_pixels;
-                pixels_size = FULL_PIXELS_SIZE;
             }
             else
             {
@@ -753,15 +831,6 @@ int main()
             
             for (int x = 0; x < thread_x_size; x += show_x_interval)
             {
-                uint8_t *pixels;
-                int pitch;
-                if (SDL_LockTexture(texture, NULL, (void**)&pixels, &pitch) < 0)
-                {
-                    fprintf(stderr, "Unable to lock texture: %s\n", SDL_GetError());
-                    exit_code = EXIT_FAILURE;
-                    goto cleanup;
-                }
-
                 pthread_t thread_ids[THREADS];
                 struct thread_data thread_datas[THREADS];
                 for (int i = 0; i < THREADS; i++)
@@ -803,10 +872,22 @@ int main()
                     }
                 }
 
-                memcpy(pixels, stored_pixels, pixels_size);
-                SDL_UnlockTexture(texture);
+                // TODO: Error handling
+                SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
+                SDL_RenderClear(renderer);
                 if (state == STATE_PREVIEW || SHOW_PREVIEW_WHEN_RENDERING)
                 {
+                    uint8_t *pixels;
+                    int pitch;
+                    if (SDL_LockTexture(preview_texture, NULL, (void**)&pixels, &pitch) < 0)
+                    {
+                        fprintf(stderr, "Unable to lock preview texture: %s\n", SDL_GetError());
+                        exit_code = EXIT_FAILURE;
+                        goto cleanup;
+                    }
+                    memcpy(pixels, preview_stored_pixels, preview_pixels_size);
+                    SDL_UnlockTexture(preview_texture);
+
                     if (SDL_RenderCopy(renderer, preview_texture, NULL, NULL) < 0)
                     {
                         fprintf(stderr, "Unable to copy preview texture: %s\n", SDL_GetError());
@@ -816,6 +897,17 @@ int main()
                 }
                 if (state == STATE_FULL)
                 {
+                    uint8_t *pixels;
+                    int pitch;
+                    if (SDL_LockTexture(full_texture, NULL, (void**)&pixels, &pitch) < 0)
+                    {
+                        fprintf(stderr, "Unable to lock full texture: %s\n", SDL_GetError());
+                        exit_code = EXIT_FAILURE;
+                        goto cleanup;
+                    }
+                    memcpy(pixels, full_stored_pixels, full_pixels_size);
+                    SDL_UnlockTexture(full_texture);
+
                     if (SDL_RenderCopy(renderer, full_texture, NULL, NULL) < 0)
                     {
                         fprintf(stderr, "Unable to copy full texture: %s\n", SDL_GetError());

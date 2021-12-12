@@ -3,7 +3,7 @@ CC_RLS=-Ofast
 CC_PRO=-Ofast -g
 
 mandelbrot: main.c Makefile
-	clang main.c -o $@ $(CC_RLS) -Werror -Wall -Wextra -Wconversion -I/opt/homebrew/include -L/opt/homebrew/lib -lsdl2 -lsdl2_image
+	clang main.c -o $@ $(CC_PRO) -Werror -Wall -Wextra -Wconversion -I/opt/homebrew/include -L/opt/homebrew/lib -lsdl2 -lsdl2_image
 
 mandelbrot.s: main.c Makefile
 	clang main.c -o $@ -S -Ofast -I/opt/homebrew/include
