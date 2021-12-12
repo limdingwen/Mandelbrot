@@ -76,4 +76,8 @@ kernel void process_pixel(
     struct fp256 math_x = calculateMathPos(screen_x, width_reciprocal, size_x, center_x);
     struct fp256 math_y = calculateMathPos(height - screen_y, height_reciprocal, size, center_y);
     results[i] = process_mandelbrot(math_x, math_y, iterations);
+    /*if (result.is_in_set)
+        results[i] = -1;
+    else
+        results[i] = escape_iterations;*/
 }
