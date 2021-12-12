@@ -1,3 +1,11 @@
+#define CL_UINT uint
+#define CL_ULONG ulong
+#include "bigfloat.h"
+#undef CL_ULONG
+#undef CL_UINT
+
+#include "shared.h"
+
 // Complex
 
 struct complex
@@ -32,22 +40,7 @@ uint complex_sqrmag_whole(struct complex a)
     return c.man[0];
 }
 
-// TODO: Add main.h
-#define SIZE_RATIO_X (struct fp256){ SIGN_POS, { 1, 0x8000000000000000, 0, 0 } } // 1.5
-
 // Thread
-
-struct mb_result
-{
-    bool is_in_set;
-    unsigned long long escape_iterations;
-};
-
-struct fp256 calculateMathPos(int screen_pos, struct fp256 width_reciprocal, struct fp256 size, struct fp256 center)
-{
-    struct fp256 offset = fp_ssub256(center, fp_asr256(size));
-    return fp_sadd256(fp_smul256(fp_smul256(int_to_fp256(screen_pos), width_reciprocal), size), offset);
-}
 
 struct mb_result process_mandelbrot(struct fp256 math_x, struct fp256 math_y, unsigned long long iterations)
 {
@@ -74,19 +67,13 @@ kernel void process_pixel(
     const ulong iterations,
     global struct mb_result *results)
 {
-    int i = get_global_id(0);
+    size_t i = get_global_id(0);
     int screen_x = i % width;
     int screen_y = i / width;
+    if (screen_y >= height)
+        return;
+    
     struct fp256 math_x = calculateMathPos(screen_x, width_reciprocal, size_x, center_x);
     struct fp256 math_y = calculateMathPos(height - screen_y, height_reciprocal, size, center_y);
     results[i] = process_mandelbrot(math_x, math_y, iterations);
-}
-
-__kernel void vector_add(__global const int *A, __global const int *B, __global int *C)
-{ 
-    // Get the index of the current element to be processed
-    int i = get_global_id(0);
- 
-    // Do the operation
-    C[i] = A[i] + B[i];
 }

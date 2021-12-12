@@ -23,8 +23,9 @@ struct fp256 fp_uadd256(struct fp256 a, struct fp256 b)
     char carry = 0;
     for (int i = 7; i >= 0; i--)
     {
-        CL_ULONG temp = a.man[i] + b.man[i] + carry;
-        carry = temp >> 32; // Note that the highest 31 bits of temp are all 0.
+        CL_ULONG temp = (CL_ULONG)a.man[i] + (CL_ULONG)b.man[i] + (CL_ULONG)carry;
+        carry = (char)(temp >> 32); // Note that the highest 31 bits of temp are all 0.
+        c.man[i] = (CL_UINT)temp;
     }
     return c;
 }
@@ -35,8 +36,9 @@ struct fp256 fp_usub256(struct fp256 a, struct fp256 b)
     char carry = 0;
     for (int i = 7; i >= 0; i--)
     {
-        CL_ULONG temp = a.man[i] - b.man[i] - carry;
-        carry = temp >> 63; // Check if wrapped around.
+        CL_ULONG temp = (CL_ULONG)a.man[i] - (CL_ULONG)b.man[i] - (CL_ULONG)carry;
+        carry = (char)(temp >> 63); // Check if wrapped around.
+        c.man[i] = (CL_UINT)temp;
     }
     return c;
 }
@@ -47,8 +49,9 @@ struct fp512 fp_uadd512(struct fp512 a, struct fp512 b)
     char carry = 0;
     for (int i = 15; i >= 0; i--)
     {
-        CL_ULONG temp = a.man[i] + b.man[i] + carry;
-        carry = temp >> 32; // Note that the highest 31 bits of temp are all 0.
+        CL_ULONG temp = (CL_ULONG)a.man[i] + (CL_ULONG)b.man[i] + (CL_ULONG)carry;
+        carry = (char)(temp >> 32); // Note that the highest 31 bits of temp are all 0.
+        c.man[i] = (CL_UINT)temp;
     }
     return c;
 }
@@ -63,7 +66,7 @@ enum cmp
 enum cmp fp_ucmp256(struct fp256 a, struct fp256 b)
 {
     struct fp256 c = fp_usub256(a, b);
-    bool is_negative = (c.man[0] >> 63) == 1;
+    bool is_negative = (c.man[0] >> 31) == 1;
     if (is_negative)
         return CMP_B_BIG;
     else
@@ -168,10 +171,10 @@ struct fp256 fp_smul256(struct fp256 a, struct fp256 b)
             //assert(low_offset >= 1);
             int high_offset = low_offset - 1;
 
-            CL_ULONG mult = (ulong)a.man[i] * (ulong)b.man[j];
+            CL_ULONG mult = (CL_ULONG)a.man[i] * (CL_ULONG)b.man[j];
             struct fp512 temp = {0};
             temp.man[low_offset] = (CL_UINT)mult;
-            temp.man[high_offset] = mult >> 64;
+            temp.man[high_offset] = mult >> 32;
 
             c = fp_uadd512(c, temp);
         }
@@ -192,12 +195,11 @@ struct fp256 fp_ssqr256(struct fp256 a)
 
 struct fp256 fp_asr256(struct fp256 a)
 {
-    a.man[3] >>= 1;
-    a.man[3] |= (a.man[2] & 0x1) << 63;
-    a.man[2] >>= 1;
-    a.man[2] |= (a.man[1] & 0x1) << 63;
-    a.man[1] >>= 1;
-    a.man[1] |= (a.man[0] & 0x1) << 63;
+    for (int i = 7; i >= 1; i--)
+    {
+        a.man[i] >>= 1;
+        a.man[i] |= (a.man[i - 1] & 0x1) << 31;
+    }
     a.man[0] >>= 1;
     return a;
 }

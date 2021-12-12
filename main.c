@@ -29,8 +29,7 @@
 #include <CL/cl.h>
 #endif
 
-// We depend on SDL2 and SDL2_image for rendering and windowing,
-// and of course the C stdlib.
+// We depend on SDL2 and SDL2_image for rendering and windowing, and C stdlib.
 
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_image.h>
@@ -40,6 +39,15 @@
 #include <stdbool.h>
 #include <math.h>
 #include <assert.h>
+
+// TODO: Document
+#define CL_UINT cl_uint
+#define CL_ULONG cl_ulong
+#include "bigfloat.h"
+#undef CL_ULONG
+#undef CL_UINT
+
+#include "shared.h"
 
 // RENDERING CONFIGURATION
 //
@@ -55,13 +63,20 @@
 // the raw hexadecimal value of the big float as converting from a decimal
 // value is too difficult.
 
-#define WINDOW_WIDTH_RECIPROCAL (struct fp256){ SIGN_POS,   { 0, 0x0048d159e26af37c, 0x048d159e26af37c0, 0x48d159e26af37c04 } }
-#define WINDOW_HEIGHT_RECIPROCAL (struct fp256){ SIGN_POS,  { 0, 0x006d3a06d3a06d3a, 0x06d3a06d3a06d3a0, 0x6d3a06d3a06d3a06 } }
+#define WINDOW_WIDTH_RECIPROCAL (struct fp256){ SIGN_POS,   { 0, 0x0048d159, 0xe26af37c, 0x048d159e, 0x26af37c0, 0x48d159e2, 0x6af37c04 } }
+#define WINDOW_HEIGHT_RECIPROCAL (struct fp256){ SIGN_POS,  { 0, 0x006d3a06, 0xd3a06d3a, 0x06d3a06d, 0x3a06d3a0, 0x6d3a06d3, 0xa06d3a06 } }
 
-// This defines how many columns of pixels we draw before presenting a frame
-// to the user. Doing this after too little columns results in slower rendering.
+// This defines how many pixels we draw before presenting a frame to the user.
+// Making this smaller will result in a smoother animation with more progress
+// updates, but in overall slower rendering.
+//
+// This value will be used as the OpenCL global work size, so make sure that
+// this is a multiple of LOCAL_WORK_SIZE. This value does not have to be a
+// factor of WINDOW_WIDTH * WINDOW_HEIGHT as we will automatically stop
+// calculations that are out of bounds.
 
-#define FULL_SHOW_X_INTERVAL 5
+#define FULL_SHOW_PIXELS_INTERVAL 32768
+#define LOCAL_WORK_SIZE 128
 
 // When switching from preview to full-mode rendering, the user might want to
 // see a black screen so the progress of the render might be easier to see,
@@ -73,12 +88,15 @@
 // Next, we define the same rendering settings, but for the preview mode. The
 // preview mode differs in that it is much smaller and faster to render, but
 // is almost identical in every other way.
+//
+// Do note that PREVIEW_SHOW_PIXELS_INTERVAL also has to be a multiple of
+// LOCAL_WORK_SIZE.
 
 #define PREVIEW_WIDTH 240
 #define PREVIEW_HEIGHT 160
-#define PREVIEW_WIDTH_RECIPROCAL (struct fp256){ SIGN_POS,  { 0, 0x0111111111111111, 0x1111111111111111, 0x1111111111111111 } }
-#define PREVIEW_HEIGHT_RECIPROCAL (struct fp256){ SIGN_POS, { 0, 0x0199999999999999, 0x9999999999999999, 0x9999999999999999 } }
-#define PREVIEW_SHOW_X_INTERVAL 5
+#define PREVIEW_WIDTH_RECIPROCAL (struct fp256){ SIGN_POS,  { 0, 0x01111111, 0x11111111, 0x11111111, 0x11111111, 0x11111111, 0x11111111 } }
+#define PREVIEW_HEIGHT_RECIPROCAL (struct fp256){ SIGN_POS, { 0, 0x01999999, 0x99999999, 0x99999999, 0x99999999, 0x99999999, 0x99999999 } }
+#define PREVIEW_SHOW_PIXELS_INTERVAL 4096
 
 // GRADIENT CONFIGURATION
 //
@@ -89,7 +107,7 @@
 // optimiser to use a mask instead. This is important since gradient is
 // calculated for every pixel on the screen.
 
-#define GRADIENT_ITERATION_SIZE 64 // Use 2^x for best performance
+#define GRADIENT_ITERATION_SIZE 64
 
 // Next, we define the actual gradient, in 0-255 RGB format. We also duplicate
 // the first and last stops, so that it will be easier for the program to loop
@@ -118,10 +136,10 @@ const struct color gradient_stops[GRADIENT_STOP_COUNT + 1] =
 // of the visible Y axis, while the X axis may be derived by multiplying by
 // SIZE_RATIO_X. This ratio may be derived using WINDOW_WIDTH / WINDOW_HEIGHT.
 
-#define INITIAL_CENTER_X (struct fp256){ SIGN_NEG, { 0, 0x8000000000000000, 0, 0 } } // -0.5
+#define INITIAL_CENTER_X (struct fp256){ SIGN_NEG, { 0, 0x80000000 } } // -0.5
 #define INITIAL_CENTER_Y (struct fp256){ SIGN_ZERO, {0} } // 0
 #define INITIAL_SIZE (struct fp256){ SIGN_POS, { 2, 0, 0, 0 }} // 2
-#define SIZE_RATIO_X (struct fp256){ SIGN_POS, { 1, 0x8000000000000000, 0, 0 } } // 1.5
+#define SIZE_RATIO_X (struct fp256){ SIGN_POS, { 1, 0x80000000 } } // 1.5
 
 // The program uses a click-to-zoom mechanic, and thus we need to show the user
 // an image so the user knows where they will be zooming into. As with all
@@ -134,7 +152,7 @@ const struct color gradient_stops[GRADIENT_STOP_COUNT + 1] =
 // out. For instance, a zoom of 0.25 will zoom the user in by 4x every click.
 // The zoom should divide WINDOW_WIDTH and WINDOW_HEIGHT, as we shall soon see.
 
-#define ZOOM (struct fp256){ SIGN_POS, { 0, 0x4000000000000000, 0, 0 } } // 0.25
+#define ZOOM (struct fp256){ SIGN_POS, { 0, 0x40000000 } } // 0.25
 #define ZOOM_RECIPROCAL (struct fp256){ SIGN_POS, { 4, 0, 0, 0 } }
 
 // Here, we define not the size of the image as seen on disk, but rather how big
@@ -195,118 +213,159 @@ struct color gradient_color(struct gradient gradient, int x)
     float stop_x = (float)x / (float)gradient.size * (float)gradient.stop_count - (float)stop_prev;
     return color_lerp(gradient.stops[stop_prev], gradient.stops[stop_next], stop_x);
 }
+
+// TODO:
 #define MAX_KERNEL_SRC_SIZE 0x100000
-#define KERNEL_SRC_PATH "test.cl"
+#define KERNEL_SRC_PATH "main.cl"
 
 int main()
 {
-    // Create the two input vectors
-    int i;
-    const int LIST_SIZE = 1024;
-    int *A = (int*)malloc(sizeof(int)*LIST_SIZE);
-    int *B = (int*)malloc(sizeof(int)*LIST_SIZE);
-    for(i = 0; i < LIST_SIZE; i++) {
-        A[i] = i;
-        B[i] = LIST_SIZE - i;
-    }
- 
-    // Load the kernel source code into the array source_str
-    FILE *fp;
-    char *source_str;
-    size_t source_size;
- 
-    fp = fopen(KERNEL_SRC_PATH, "r");
-    if (!fp) {
-        fprintf(stderr, "Failed to load kernel.\n");
-        exit(1);
-    }
-    source_str = (char*)malloc(MAX_KERNEL_SRC_SIZE);
-    source_size = fread( source_str, 1, MAX_KERNEL_SRC_SIZE, fp);
-    fclose( fp );
- 
-    // Get platform and device information
-    cl_platform_id platform_id = NULL;
-    cl_device_id device_id = NULL;   
-    cl_uint ret_num_devices;
-    cl_uint ret_num_platforms;
-    cl_int ret = clGetPlatformIDs(1, &platform_id, &ret_num_platforms);
-    ret = clGetDeviceIDs( platform_id, CL_DEVICE_TYPE_DEFAULT, 1, 
-            &device_id, &ret_num_devices);
- 
-    // Create an OpenCL context
-    cl_context context = clCreateContext( NULL, 1, &device_id, NULL, NULL, &ret);
- 
-    // Create a command queue
-    cl_command_queue command_queue = clCreateCommandQueue(context, device_id, 0, &ret);
- 
-    // Create memory buffers on the device for each vector 
-    cl_mem a_mem_obj = clCreateBuffer(context, CL_MEM_READ_ONLY, 
-            LIST_SIZE * sizeof(int), NULL, &ret);
-    cl_mem b_mem_obj = clCreateBuffer(context, CL_MEM_READ_ONLY,
-            LIST_SIZE * sizeof(int), NULL, &ret);
-    cl_mem c_mem_obj = clCreateBuffer(context, CL_MEM_WRITE_ONLY, 
-            LIST_SIZE * sizeof(int), NULL, &ret);
- 
-    // Copy the lists A and B to their respective memory buffers
-    ret = clEnqueueWriteBuffer(command_queue, a_mem_obj, CL_TRUE, 0,
-            LIST_SIZE * sizeof(int), A, 0, NULL, NULL);
-    ret = clEnqueueWriteBuffer(command_queue, b_mem_obj, CL_TRUE, 0, 
-            LIST_SIZE * sizeof(int), B, 0, NULL, NULL);
- 
-    // Create a program from the kernel source
-    cl_program program = clCreateProgramWithSource(context, 1, 
-            (const char **)&source_str, (const size_t *)&source_size, &ret);
- 
-    // Build the program
-    ret = clBuildProgram(program, 1, &device_id, NULL, NULL, NULL);
- 
-    // Create the OpenCL kernel
-    cl_kernel kernel = clCreateKernel(program, "vector_add", &ret);
- 
-    // Set the arguments of the kernel
-    ret = clSetKernelArg(kernel, 0, sizeof(cl_mem), (void *)&a_mem_obj);
-    ret = clSetKernelArg(kernel, 1, sizeof(cl_mem), (void *)&b_mem_obj);
-    ret = clSetKernelArg(kernel, 2, sizeof(cl_mem), (void *)&c_mem_obj);
- 
-    // Execute the OpenCL kernel on the list
-    size_t global_item_size = LIST_SIZE; // Process the entire lists
-    size_t local_item_size = 64; // Divide work items into groups of 64
-    ret = clEnqueueNDRangeKernel(command_queue, kernel, 1, NULL, 
-            &global_item_size, &local_item_size, 0, NULL, NULL);
- 
-    // Read the memory buffer C on the device to the local variable C
-    int *C = (int*)malloc(sizeof(int)*LIST_SIZE);
-    ret = clEnqueueReadBuffer(command_queue, c_mem_obj, CL_TRUE, 0, 
-            LIST_SIZE * sizeof(int), C, 0, NULL, NULL);
- 
-    // Display the result to the screen
-    for(i = 0; i < LIST_SIZE; i++)
-        printf("%d + %d = %d\n", A[i], B[i], C[i]);
- 
-    // Clean up
-    ret = clFlush(command_queue);
-    ret = clFinish(command_queue);
-    ret = clReleaseKernel(kernel);
-    ret = clReleaseProgram(program);
-    ret = clReleaseMemObject(a_mem_obj);
-    ret = clReleaseMemObject(b_mem_obj);
-    ret = clReleaseMemObject(c_mem_obj);
-    ret = clReleaseCommandQueue(command_queue);
-    ret = clReleaseContext(context);
-    free(A);
-    free(B);
-    free(C);
-    return 0;
-
-    int err;
     int exit_code = EXIT_SUCCESS;
 
-    // Start SDL
+// We'll declare our free-able variables at the top of the function, so that
+// when we jump to cleanup, all of them will have known values, even if the
+// initialising code has not been run yet (in which case it'll be NULL).
+//
+// FIXME: OpenCL does not accept NULL as free targets.
 
+    FILE *kernel_src_fp = NULL;
+    char *kernel_src_str = NULL;
+    cl_command_queue command_queue = NULL;
+    cl_kernel kernel = NULL;
+    cl_program program = NULL;
+    cl_mem results_mem = NULL;
+    cl_context context = NULL;
+    struct mb_result *results = NULL;
     uint8_t *full_stored_pixels = NULL, *preview_stored_pixels = NULL;
     SDL_Renderer *renderer = NULL;
     SDL_Window *window = NULL;
     SDL_Texture *full_texture = NULL, *preview_texture = NULL, *zoom_image = NULL;
+
+// OPENCL INITIALISATION
+//
+// First, read in the entire source file of our OpenCL kernel. We'll use the
+// heap to store the kernel source string, as it might be too big for the stack.
+
+    kernel_src_fp = fopen(KERNEL_SRC_PATH, "r");
+    if (kernel_src_fp == NULL)
+    {
+        fputs("Unable to load kernel " KERNEL_SRC_PATH ".", stderr);
+        exit_code = EXIT_FAILURE;
+        goto cleanup;
+    }
+    kernel_src_str = malloc(MAX_KERNEL_SRC_SIZE);
+    if (kernel_src_str == NULL)
+    {
+        fputs("Unable to allocate memory for the kernel source code.", stderr);
+        exit_code = EXIT_FAILURE;
+        goto cleanup;
+    }
+    size_t kernel_source_size = fread(kernel_src_str, 1, MAX_KERNEL_SRC_SIZE, kernel_src_fp);
+    if (kernel_source_size == 0 && ferror(kernel_src_fp))
+    {
+        fputs("Unable to read the kernel source code.", stderr);
+        exit_code = EXIT_FAILURE;
+        goto cleanup;
+    }
+
+// We need to find out what OpenCL platforms and devices exist, for use
+// in later functions. Here, we'll ignore all other platforms and devices,
+// assuming that there's only one.
+
+    cl_int cl_err;
+    cl_platform_id platform_id;
+    cl_err = clGetPlatformIDs(1, &platform_id, NULL);
+    if (cl_err != CL_SUCCESS)
+    {
+        fprintf(stderr, "Unable to get OpenCL platform ID: %d\n", cl_err);
+        exit_code = EXIT_FAILURE;
+        goto cleanup;
+    }
+
+    cl_device_id device_id;
+    cl_err = clGetDeviceIDs(platform_id, CL_DEVICE_TYPE_DEFAULT, 1, &device_id, NULL);
+    if (cl_err != CL_SUCCESS)
+    {
+        fprintf(stderr, "Unable to get OpenCL device ID: %d\n", cl_err);
+        exit_code = EXIT_FAILURE;
+        goto cleanup;
+    }
+
+// Some more boilerplate...
+
+    context = clCreateContext(NULL, 1, &device_id, NULL, NULL, &cl_err);
+    if (cl_err != CL_SUCCESS)
+    {
+        fprintf(stderr, "Unable to create OpenCL context: %d\n", cl_err);
+        exit_code = EXIT_FAILURE;
+        goto cleanup;
+    }
+
+    command_queue = clCreateCommandQueue(context, device_id, 0, &cl_err);
+    if (cl_err != CL_SUCCESS)
+    {
+        fprintf(stderr, "Unable to create OpenCL command queue: %d\n", cl_err);
+        exit_code = EXIT_FAILURE;
+        goto cleanup;
+    }
+
+// Next, we'll create a buffer for the GPU to write the mandelbrot results to.
+// We'll use the full-sized dimensions as we assume it to be bigger (and thus
+// able to hold) than the preview dimensions.
+//
+// We'll also create a corresponding buffer for the CPU, so we can copy the
+// results from the GPU to the CPU later on.
+
+    static const size_t results_size = WINDOW_WIDTH * WINDOW_HEIGHT * sizeof(struct mb_result);
+    results_mem = clCreateBuffer(context, CL_MEM_WRITE_ONLY, results_size, NULL, &cl_err);
+    if (cl_err != CL_SUCCESS)
+    {
+        fprintf(stderr, "Unable to create OpenCL results buffer: %d\n", cl_err);
+        exit_code = EXIT_FAILURE;
+        goto cleanup;
+    }
+
+    results = malloc(results_size);
+    if (results == NULL)
+    {
+        fputs("Unable to allocate memory for the results buffer.", stderr);
+        exit_code = EXIT_FAILURE;
+        goto cleanup;
+    }
+
+// Now, compile the source code. There's some weird casting going on here.
+// That's because the API can accept multiple source files to compile from, but
+// since we only have 1, we can simply cast it into a C array using its address.
+
+    program = clCreateProgramWithSource(context, 1,
+        (const char**)&kernel_src_str, (const size_t*)&kernel_source_size, &cl_err);
+    if (cl_err != CL_SUCCESS)
+    {
+        fprintf(stderr, "Unable to create OpenCL program: %d\n", cl_err);
+        exit_code = EXIT_FAILURE;
+        goto cleanup;
+    }
+
+    cl_err = clBuildProgram(program, 1, &device_id, NULL, NULL, NULL);
+    if (cl_err != CL_SUCCESS)
+    {
+        fprintf(stderr, "Unable to build OpenCL program: %d\n", cl_err);
+        exit_code = EXIT_FAILURE;
+        goto cleanup;
+    }
+
+// Finally, we'll create the kernel that we'll call later on to run the
+// calculations, and that ends our OpenCL initialisation.
+
+    kernel = clCreateKernel(program, "process_pixel", &cl_err);
+    if (cl_err != CL_SUCCESS)
+    {
+        fprintf(stderr, "Unable to create OpenCL kernel: %d\n", cl_err);
+        exit_code = EXIT_FAILURE;
+        goto cleanup;
+    }
+ 
+    // Start SDL
 
     if (SDL_Init(SDL_INIT_VIDEO) < 0)
     {
@@ -369,13 +428,13 @@ int main()
     struct fp256 size = INITIAL_SIZE;
     struct fp256 center_x = INITIAL_CENTER_X;
     struct fp256 center_y = INITIAL_CENTER_Y;
-    unsigned long long iterations = 32;
+    cl_ulong iterations = 32;
 
-    static const int full_pixels_size = WINDOW_WIDTH * WINDOW_HEIGHT * 4;
-    static const int preview_pixels_size = PREVIEW_WIDTH * PREVIEW_HEIGHT * 4;
+    static const size_t full_pixels_size = WINDOW_WIDTH * WINDOW_HEIGHT * 4 * sizeof(uint8_t);
+    static const size_t preview_pixels_size = PREVIEW_WIDTH * PREVIEW_HEIGHT * 4 * sizeof(uint8_t);
 
-    full_stored_pixels = calloc(1, full_pixels_size * sizeof(uint8_t));
-    preview_stored_pixels = calloc(1, preview_pixels_size * sizeof(uint8_t));
+    full_stored_pixels = calloc(1, full_pixels_size);
+    preview_stored_pixels = calloc(1, preview_pixels_size);
     if (full_stored_pixels == NULL || preview_stored_pixels == NULL)
     {
         fputs("Unable to allocate memory for storing pixels.", stderr);
@@ -487,20 +546,16 @@ int main()
             haveToRender = false;
             uint64_t begin_time = SDL_GetPerformanceCounter();
 
-            int thread_x_size;
-            int show_x_interval;
-            const struct thread_block *thread_blocks;
-            int width;
-            int height;
+            long long show_pixels_interval;
+            cl_int width;
+            cl_int height;
             struct fp256 width_reciprocal;
             struct fp256 height_reciprocal;
             uint8_t *stored_pixels;
 
             if (state == STATE_PREVIEW)
             {
-                thread_x_size =  PREVIEW_THREAD_X_SIZE;
-                show_x_interval = PREVIEW_SHOW_X_INTERVAL;
-                thread_blocks = preview_thread_blocks;
+                show_pixels_interval = PREVIEW_SHOW_PIXELS_INTERVAL;
                 width = PREVIEW_WIDTH;
                 height = PREVIEW_HEIGHT;
                 width_reciprocal = PREVIEW_WIDTH_RECIPROCAL;
@@ -509,9 +564,7 @@ int main()
             }
             else if (state == STATE_FULL)
             {
-                thread_x_size =  FULL_THREAD_X_SIZE;
-                show_x_interval = FULL_SHOW_X_INTERVAL;
-                thread_blocks = full_thread_blocks;
+                show_pixels_interval = FULL_SHOW_PIXELS_INTERVAL;
                 width = WINDOW_WIDTH;
                 height = WINDOW_HEIGHT;
                 width_reciprocal = WINDOW_WIDTH_RECIPROCAL;
@@ -524,51 +577,72 @@ int main()
                 exit_code = EXIT_FAILURE;
                 goto cleanup;
             }
+
+            struct fp256 size_x = fp_smul256(size, SIZE_RATIO_X);
             
-            for (int x = 0; x < thread_x_size; x += show_x_interval)
+            for (int offset = 0; offset < (width * height); offset += show_pixels_interval)
             {
-                pthread_t thread_ids[THREADS];
-                struct thread_data thread_datas[THREADS];
-                for (int i = 0; i < THREADS; i++)
+                cl_err = clSetKernelArg(kernel, 0, sizeof(cl_int), &width);
+                cl_err = clSetKernelArg(kernel, 1, sizeof(cl_int), &height);
+                cl_err = clSetKernelArg(kernel, 2, sizeof(struct fp256), &width_reciprocal);
+                cl_err = clSetKernelArg(kernel, 3, sizeof(struct fp256), &height_reciprocal);
+                cl_err = clSetKernelArg(kernel, 4, sizeof(struct fp256), &size);
+                cl_err = clSetKernelArg(kernel, 5, sizeof(struct fp256), &size_x);
+                cl_err = clSetKernelArg(kernel, 6, sizeof(struct fp256), &center_x);
+                cl_err = clSetKernelArg(kernel, 7, sizeof(struct fp256), &center_y);
+                cl_err = clSetKernelArg(kernel, 8, sizeof(cl_ulong), &iterations);
+                cl_err = clSetKernelArg(kernel, 9, sizeof(cl_mem), &results_mem);
+
+                size_t global_work_offset = (size_t)offset;
+                size_t global_work_size = (size_t)show_pixels_interval;
+                size_t local_work_size = LOCAL_WORK_SIZE;
+                cl_err = clEnqueueNDRangeKernel(command_queue, kernel, 1,
+                    &global_work_offset, &global_work_size, &local_work_size,
+                    0, NULL, NULL);
+                if (cl_err != CL_SUCCESS)
                 {
-                    // Quick hack for "bottom blocks reverse X" effect
-                    int visual_x = (i < 4) ? x : (thread_x_size - x - show_x_interval);
-                    thread_datas[i] = (struct thread_data){
-                        thread_blocks[i].x_start + visual_x,
-                        thread_blocks[i].x_start + visual_x + show_x_interval - 1,
-                        thread_blocks[i].y_start,
-                        thread_blocks[i].y_end,
-                        width,
-                        height,
-                        width_reciprocal,
-                        height_reciprocal,
-                        size,
-                        center_x,
-                        center_y,
-                        iterations,
-                        stored_pixels
-                    };
-                    err = pthread_create(&thread_ids[i], NULL, thread, &thread_datas[i]);
-                    if (err != 0)
+                    fprintf(stderr, "Unable to run the OpenCL kernel: %d\n", cl_err);
+                    exit_code = EXIT_FAILURE;
+                    goto cleanup;
+                }
+
+                cl_err = clEnqueueReadBuffer(command_queue, results_mem, CL_TRUE, 0,
+                    results_size, results, 0, NULL, NULL);
+                if (cl_err != CL_SUCCESS)
+                {
+                    fprintf(stderr, "Unable to read the OpenCL results buffer: %d\n", cl_err);
+                    exit_code = EXIT_FAILURE;
+                    goto cleanup;
+                }
+
+                for (int i = offset; i < offset + show_pixels_interval; i++)
+                {
+                    struct mb_result result = results[i];
+                    if (result.is_in_set)
                     {
-                        fprintf(stderr, "Unable to create thread: Error code %d\n", err);
-                        exit_code = EXIT_FAILURE;
-                        goto cleanup;
+                        stored_pixels[i * 4 + 0] = 0;
+                        stored_pixels[i * 4 + 1] = 0;
+                        stored_pixels[i * 4 + 2] = 0;
+                        stored_pixels[i * 4 + 3] = 255;
+                    }
+                    else
+                    {
+                        static const struct gradient gradient =
+                        {
+                            GRADIENT_STOP_COUNT,
+                            GRADIENT_ITERATION_SIZE,
+                            gradient_stops
+                        };
+                        struct color color = gradient_color(gradient,
+                            (int)result.escape_iterations); // Assume no problem since modding
+                        stored_pixels[i * 4 + 0] = (uint8_t)color.r;
+                        stored_pixels[i * 4 + 1] = (uint8_t)color.g;
+                        stored_pixels[i * 4 + 2] = (uint8_t)color.b;
+                        stored_pixels[i * 4 + 3] = 255;
                     }
                 }
 
-                for (int i = 0; i < THREADS; i++)
-                {
-                    err = pthread_join(thread_ids[i], NULL);
-                    if (err != 0)
-                    {
-                        fprintf(stderr, "Unable to join thread: Error code %d\n", err);
-                        exit_code = EXIT_FAILURE;
-                        goto cleanup;
-                    }
-                }
-
-                // TODO: Error handling
+                // TODO: Error handling. Also, is this even needed?
                 SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
                 SDL_RenderClear(renderer);
                 if (state == STATE_PREVIEW || SHOW_PREVIEW_WHEN_RENDERING)
@@ -651,7 +725,14 @@ int main()
     SDL_DestroyRenderer(renderer);
     SDL_DestroyWindow(window);
     SDL_Quit();
+    clFlush(command_queue);
+    clFinish(command_queue);
+    clReleaseKernel(kernel);
+    clReleaseProgram(program);
+    clReleaseMemObject(results_mem);
+    clReleaseCommandQueue(command_queue);
+    clReleaseContext(context);
+    fclose(kernel_src_fp);
 
     return exit_code;
-*/
 }
