@@ -96,7 +96,7 @@
 #define PREVIEW_HEIGHT 160
 #define PREVIEW_WIDTH_RECIPROCAL (struct fp256){ SIGN_POS,  { 0, 0x01111111, 0x11111111, 0x11111111, 0x11111111, 0x11111111, 0x11111111 } }
 #define PREVIEW_HEIGHT_RECIPROCAL (struct fp256){ SIGN_POS, { 0, 0x01999999, 0x99999999, 0x99999999, 0x99999999, 0x99999999, 0x99999999 } }
-#define PREVIEW_SHOW_PIXELS_INTERVAL 4096
+#define PREVIEW_SHOW_PIXELS_INTERVAL 16384
 
 // GRADIENT CONFIGURATION
 //
@@ -235,7 +235,7 @@ int main()
     cl_program program = NULL;
     cl_mem results_mem = NULL;
     cl_context context = NULL;
-    struct mb_result *results = NULL;
+    cl_ulong *results = NULL;
     uint8_t *full_stored_pixels = NULL, *preview_stored_pixels = NULL;
     SDL_Renderer *renderer = NULL;
     SDL_Window *window = NULL;
@@ -316,7 +316,7 @@ int main()
 // We'll also create a corresponding buffer for the CPU, so we can copy the
 // results from the GPU to the CPU later on.
 
-    static const size_t results_size = WINDOW_WIDTH * WINDOW_HEIGHT * sizeof(struct mb_result);
+    static const size_t results_size = WINDOW_WIDTH * WINDOW_HEIGHT * sizeof(cl_ulong);
     results_mem = clCreateBuffer(context, CL_MEM_WRITE_ONLY, results_size, NULL, &cl_err);
     if (cl_err != CL_SUCCESS)
     {
@@ -617,8 +617,8 @@ int main()
 
                 for (int i = offset; i < offset + show_pixels_interval; i++)
                 {
-                    struct mb_result result = results[i];
-                    if (result.is_in_set)
+                    cl_ulong result = results[i];
+                    if (result == (cl_ulong)-1)
                     {
                         stored_pixels[i * 4 + 0] = 0;
                         stored_pixels[i * 4 + 1] = 0;
@@ -634,7 +634,7 @@ int main()
                             gradient_stops
                         };
                         struct color color = gradient_color(gradient,
-                            (int)result.escape_iterations); // Assume no problem since modding
+                            (int)result); // Assume no problem since modding
                         stored_pixels[i * 4 + 0] = (uint8_t)color.r;
                         stored_pixels[i * 4 + 1] = (uint8_t)color.g;
                         stored_pixels[i * 4 + 2] = (uint8_t)color.b;

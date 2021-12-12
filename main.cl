@@ -42,17 +42,17 @@ uint complex_sqrmag_whole(struct complex a)
 
 // Thread
 
-struct mb_result process_mandelbrot(struct fp256 math_x, struct fp256 math_y, unsigned long long iterations)
+ulong process_mandelbrot(struct fp256 math_x, struct fp256 math_y, ulong iterations)
 {
     struct complex c = { math_x, math_y };
     struct complex z = { { SIGN_ZERO, {0} }, { SIGN_ZERO, {0} } };
-    for (unsigned long long i = 0; i < iterations; i++)
+    for (ulong i = 0; i < iterations; i++)
     {
         z = complex_add(complex_sqr(z), c);
         if (complex_sqrmag_whole(z) >= 4) // sqr(2), where 2 is "radius of escape"
-            return (struct mb_result) { false, i };
+            return i;
     }
-    return (struct mb_result) { true, -1ULL };
+    return -1UL;
 }
 
 kernel void process_pixel(
@@ -65,7 +65,7 @@ kernel void process_pixel(
     const struct fp256 center_x,
     const struct fp256 center_y,
     const ulong iterations,
-    global struct mb_result *results)
+    global ulong *results) // Workaround for Metal compiler
 {
     size_t i = get_global_id(0);
     int screen_x = i % width;
