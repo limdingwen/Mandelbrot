@@ -1,6 +1,0 @@
-0000000000000000000000000000000000000000 ee8a182f5d2cf4da3fba9b8bb6fc9429950500b9 Lim Ding Wen <limdingwen@gmail.com> 1639045580 +0800	branch: Created from HEAD
-ee8a182f5d2cf4da3fba9b8bb6fc9429950500b9 b80be5d8f66b295e1b2f1eb90ade3b8a1ddb1ab6 Lim Ding Wen <limdingwen@gmail.com> 1639045588 +0800	commit: Remove interactive
-b80be5d8f66b295e1b2f1eb90ade3b8a1ddb1ab6 248c9a3a7ee48fab8d3589f357bbfed8c48c863e Lim Ding Wen <limdingwen@gmail.com> 1639058089 +0800	commit (amend): Remove interactive
-248c9a3a7ee48fab8d3589f357bbfed8c48c863e a0977ba66f22b9486a0bb765235d017fe0163ff5 Lim Ding Wen <limdingwen@gmail.com> 1639058566 +0800	commit: Float crash
-a0977ba66f22b9486a0bb765235d017fe0163ff5 005fd279504df7244b9823ea7f002a40003edd60 Lim Ding Wen <limdingwen@gmail.com> 1639059053 +0800	commit: Float limit reached
-005fd279504df7244b9823ea7f002a40003edd60 a0977ba66f22b9486a0bb765235d017fe0163ff5 Lim Ding Wen <limdingwen@gmail.com> 1639059258 +0800	reset: moving to HEAD~
