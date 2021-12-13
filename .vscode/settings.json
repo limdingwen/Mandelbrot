@@ -3,6 +3,7 @@
         "stdbool.h": "c"
     },
     "OpenCL.server.buildOptions": [
-        "-I/Users/ignis/Documents/Current/Programming/Mandelbrot"
+        "-I",
+        "/Users/ignis/Documents/Current/Programming/Mandelbrot"
     ]
 }

@@ -1,4 +1,4 @@
-CC_DBG=-O0 -g
+CC_DBG=-fsanitize=address,undefined -O0 -g
 CC_RLS=-Ofast
 CC_PRO=-Ofast -g
 

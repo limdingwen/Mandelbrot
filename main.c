@@ -6,8 +6,9 @@
 // TODO: Better colouring
 // TODO: Better iteration calculation
 // TODO: Optimise (OpenCL?)
+// TODO: Scan-build not working?
 // TODO: Make movie
-// And of course, TODO: Make video (probably 2-parter).
+// And of course, TODO: Make video.
 //
 // This program renders the mandelbrot set, which may be zoomed in via clicking.
 // It has two modes; preview and full-sized rendering. Both modes are nearly
@@ -76,7 +77,7 @@
 // calculations that are out of bounds.
 
 #define FULL_SHOW_PIXELS_INTERVAL 32768
-#define LOCAL_WORK_SIZE 128
+#define LOCAL_WORK_SIZE 64
 
 // When switching from preview to full-mode rendering, the user might want to
 // see a black screen so the progress of the render might be easier to see,
@@ -422,7 +423,7 @@ int main()
         fputs("Blend blendmode not supported on this platform.", stderr);
         fputs("Zoom image may not show correctly.", stderr);
     }
-    puts("Started.");
+    puts("Mandelbrot started.");
 
     // Main loop
     struct fp256 size = INITIAL_SIZE;
@@ -515,7 +516,7 @@ int main()
                         center_x = calculateMathPos(mouse_x, WINDOW_WIDTH_RECIPROCAL, size_x, center_x);
                         center_y = calculateMathPos(WINDOW_HEIGHT - mouse_y, WINDOW_HEIGHT_RECIPROCAL, size, center_y);
                         size = fp_smul256(size, ZOOM);
-                        iterations += 64; // TODO: Less hardcoded
+                        iterations *= 4; // TODO: Less hardcoded
                         memset(full_stored_pixels, 0, full_pixels_size);
                         memset(preview_stored_pixels, 0, preview_pixels_size);
                     }
@@ -523,7 +524,7 @@ int main()
                     {
                         haveToRender = true;
                         size = fp_smul256(size, ZOOM_RECIPROCAL);
-                        iterations -= 64;
+                        iterations /= 4;
                         memset(full_stored_pixels, 0, full_pixels_size);
                         memset(preview_stored_pixels, 0, preview_pixels_size);
                     }
@@ -606,6 +607,14 @@ int main()
                     goto cleanup;
                 }
 
+                printf("Enqueue kernel completed. Time taken: %fms.\n",
+                    (float)(SDL_GetPerformanceCounter() - begin_time) / (float)SDL_GetPerformanceFrequency() * 1000);
+
+                clFinish(command_queue);
+
+                printf("Kernel completed. Time taken: %fms.\n",
+                    (float)(SDL_GetPerformanceCounter() - begin_time) / (float)SDL_GetPerformanceFrequency() * 1000);
+
                 cl_err = clEnqueueReadBuffer(command_queue, results_mem, CL_TRUE, 0,
                     results_size, results, 0, NULL, NULL);
                 if (cl_err != CL_SUCCESS)
@@ -614,6 +623,9 @@ int main()
                     exit_code = EXIT_FAILURE;
                     goto cleanup;
                 }
+
+                printf("Reading buffer completed. Time taken: %fms.\n",
+                    (float)(SDL_GetPerformanceCounter() - begin_time) / (float)SDL_GetPerformanceFrequency() * 1000);
 
                 for (int i = offset; i < offset + show_pixels_interval; i++)
                 {
@@ -641,6 +653,9 @@ int main()
                         stored_pixels[i * 4 + 3] = 255;
                     }
                 }
+
+                printf("Gradient completed. Time taken: %fms.\n",
+                    (float)(SDL_GetPerformanceCounter() - begin_time) / (float)SDL_GetPerformanceFrequency() * 1000);
 
                 // TODO: Error handling. Also, is this even needed?
                 SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
@@ -717,7 +732,7 @@ int main()
     }
 
     cleanup:
-    puts("Quitting...");
+    puts("Quitting Mandelbrot...");
     free(preview_stored_pixels);
     free(full_stored_pixels);
     SDL_DestroyTexture(preview_texture);
