@@ -5,9 +5,9 @@
 //
 // TODO: Better colouring
 // TODO: Better iteration calculation
-// TODO: Optimise (OpenCL?)
+// TODO: Optimise
 // TODO: Make movie
-// And of course, TODO: Make video (probably 2-parter).
+// And of course, TODO: Make video.
 //
 // DEPENDENCIES
 // We depend on SDL2 and SDL2_image, both of which was downloaded from Homebrew
@@ -139,11 +139,11 @@ struct color
 #define GRADIENT_STOP_COUNT 4
 const struct color gradient_stops[GRADIENT_STOP_COUNT + 1] =
 {
-    { 0, 0, 255 },
-    { 255, 255, 0 },
-    { 0, 255, 0 },
-    { 255, 0, 0 },
-    { 0, 0, 255 }, // For looping
+    { 0x44, 0x44, 0xFF },
+    { 0x44, 0xFF, 0x44 },
+    { 0xFF, 0xFF, 0x44 },
+    { 0xFF, 0x44, 0x44 },
+    { 0x44, 0x44, 0xFF }, // For looping
 };
 
 // OTHER CONFIGURATION
@@ -667,13 +667,14 @@ int main()
         fputs("Blend blendmode not supported on this platform.", stderr);
         fputs("Zoom image may not show correctly.", stderr);
     }
-    puts("Started.");
+    puts("Mandelbrot started.");
 
     // Main loop
     struct fp256 size = INITIAL_SIZE;
     struct fp256 center_x = INITIAL_CENTER_X;
     struct fp256 center_y = INITIAL_CENTER_Y;
-    unsigned long long iterations = 32;
+    unsigned long long iterations = 64;
+    unsigned long long zoom = 1;
 
     static const int full_pixels_size = WINDOW_WIDTH * WINDOW_HEIGHT * 4;
     static const int preview_pixels_size = PREVIEW_WIDTH * PREVIEW_HEIGHT * 4;
@@ -741,6 +742,7 @@ int main()
                             center_y = INITIAL_CENTER_Y;
                             size = INITIAL_SIZE;
                             iterations = 32;
+                            zoom = 1;
                             // Not doing memset is intended, for the visual effect.
                         }
                         break;
@@ -760,7 +762,9 @@ int main()
                         center_x = calculateMathPos(mouse_x, WINDOW_WIDTH_RECIPROCAL, size_x, center_x);
                         center_y = calculateMathPos(WINDOW_HEIGHT - mouse_y, WINDOW_HEIGHT_RECIPROCAL, size, center_y);
                         size = fp_smul256(size, ZOOM);
-                        iterations += 64; // TODO: Less hardcoded
+                        iterations *= 2; // TODO: Less hardcoded
+                        zoom *= 4;
+                        printf("Zoom: %llu\n", zoom);
                         memset(full_stored_pixels, 0, full_pixels_size);
                         memset(preview_stored_pixels, 0, preview_pixels_size);
                     }
@@ -768,7 +772,9 @@ int main()
                     {
                         haveToRender = true;
                         size = fp_smul256(size, ZOOM_RECIPROCAL);
-                        iterations -= 64;
+                        iterations /= 2;
+                        zoom /= 4;
+                        printf("Zoom: %llu\n", zoom);
                         memset(full_stored_pixels, 0, full_pixels_size);
                         memset(preview_stored_pixels, 0, preview_pixels_size);
                     }
@@ -947,7 +953,7 @@ int main()
     }
 
     cleanup:
-    puts("Quitting...");
+    puts("Quitting Mandelbrot...");
     free(preview_stored_pixels);
     free(full_stored_pixels);
     SDL_DestroyTexture(preview_texture);
