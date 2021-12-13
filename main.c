@@ -3,9 +3,8 @@
 // Welcome to Mandelbrot, with big floats. This is a work in progress, so in the
 // meantime, here's a TODO list of things I still need to do.
 //
-// TODO: Better colouring
 // TODO: Better iteration calculation
-// TODO: Optimise
+// TODO: Document
 // TODO: Make movie
 // And of course, TODO: Make video.
 //
@@ -517,22 +516,6 @@ struct complex complex_mul(struct complex a, struct complex b)
     };
 }
 
-struct complex complex_sqr(struct complex a)
-{
-    return (struct complex)
-    {
-        fp_ssub256(fp_smul256(a.x, a.x), fp_smul256(a.y, a.y)),
-        fp_asl256(fp_smul256(a.x, a.y))
-    };
-}
-
-// Only returns the whole number part
-uint64_t complex_sqrmag_whole(struct complex a)
-{
-    struct fp256 c = fp_sadd256(fp_ssqr256(a.x), fp_ssqr256(a.y));
-    return c.man[0];
-}
-
 // Thread
 
 struct fp256 calculateMathPos(int screen_pos, struct fp256 width_reciprocal, struct fp256 size, struct fp256 center)
@@ -549,15 +532,21 @@ struct mb_result
 
 struct mb_result process_mandelbrot(struct fp256 math_x, struct fp256 math_y, unsigned long long iterations)
 {
-    struct complex c = { math_x, math_y };
-    struct complex z = { { SIGN_ZERO, {0} }, { SIGN_ZERO, {0} } };
+    struct fp256 x2 = { SIGN_ZERO, {0} };
+    struct fp256 y2 = { SIGN_ZERO, {0} };
+    struct fp256 x = { SIGN_ZERO, {0} };
+    struct fp256 y = { SIGN_ZERO, {0} };
+
     for (unsigned long long i = 0; i < iterations; i++)
     {
-        z = complex_add(complex_sqr(z), c);
-        if (complex_sqrmag_whole(z) >= 4) // sqr(2), where 2 is "radius of escape"
-            return (struct mb_result) { false, i };
+        y = fp_sadd256(fp_asl256(fp_smul256(x, y)), math_y);
+        x = fp_sadd256(fp_ssub256(x2, y2), math_x);
+        x2 = fp_ssqr256(x);
+        y2 = fp_ssqr256(y);
+        if (fp_sadd256(x2, y2).man[0] >= 4)
+            return (struct mb_result){ false, i };
     }
-    return (struct mb_result) { true, -1ULL };
+    return (struct mb_result){ true, -1ULL };
 }
 
 struct thread_data
