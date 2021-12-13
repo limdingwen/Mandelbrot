@@ -4,7 +4,7 @@
 // meantime, here's a TODO list of things I still need to do.
 //
 // TODO: Better iteration calculation
-// TODO: Document
+// TODO: Documentation
 // TODO: Make movie
 // And of course, TODO: Make video.
 //
@@ -13,6 +13,7 @@
 // on the author's machine. Aside from that, we only depend on the stdlib,
 // as well as POSIX threads. C11 threads were not available on the author's Mac.
 
+#include "SDL2/SDL_video.h"
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_image.h>
 #include <stdio.h>
@@ -177,10 +178,6 @@ const struct color gradient_stops[GRADIENT_STOP_COUNT + 1] =
 
 #define ZOOM_IMAGE_SIZE_X 225
 #define ZOOM_IMAGE_SIZE_Y 150
-
-// Finally, for efficiency sake, we'll use a fixed length for the title string.
-
-#define MAX_TITLE_LENGTH 256 
 
 // GRADIENT IMPLEMENTATION
 //
@@ -591,7 +588,7 @@ void *thread(void *arg)
                     GRADIENT_ITERATION_SIZE,
                     gradient_stops
                 };
-                color = gradient_color(gradient, sqrtf((float)result.escape_iterations)); // TODO: If got problems, make this unsigned long long
+                color = gradient_color(gradient, (float)sqrt((double)result.escape_iterations));
             }
             
             int r_offset = (screen_y*data->width + screen_x)*4;
@@ -629,6 +626,7 @@ int main()
         exit_code = EXIT_FAILURE;
         goto cleanup;
     }
+    SDL_SetWindowTitle(window, "Mandelbrot: Your CPU is on fire");
     full_texture = SDL_CreateTexture(renderer,
         SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_STREAMING, WINDOW_WIDTH, WINDOW_HEIGHT);
     if (full_texture == NULL)
@@ -704,7 +702,6 @@ int main()
     bool running = true;
     while (running)
     {
-        // FIXME: Mouse lag
         int mouse_x, mouse_y;
         SDL_PumpEvents();
         SDL_GetMouseState(&mouse_x, &mouse_y);
@@ -767,7 +764,7 @@ int main()
                         center_x = calculateMathPos(mouse_x, WINDOW_WIDTH_RECIPROCAL, size_x, center_x);
                         center_y = calculateMathPos(WINDOW_HEIGHT - mouse_y, WINDOW_HEIGHT_RECIPROCAL, size, center_y);
                         size = fp_smul256(size, ZOOM);
-                        iterations *= 2; // TODO: Less hardcoded
+                        iterations += iterations / 2; // TODO: Less hardcoded
                         zoom *= 4;
                         printf("Zoom: %llu\n", zoom);
                         memset(full_stored_pixels, 0, full_pixels_size);
@@ -777,7 +774,7 @@ int main()
                     {
                         haveToRender = true;
                         size = fp_smul256(size, ZOOM_RECIPROCAL);
-                        iterations /= 2;
+                        iterations -= iterations / 3;
                         zoom /= 4;
                         printf("Zoom: %llu\n", zoom);
                         memset(full_stored_pixels, 0, full_pixels_size);
@@ -790,10 +787,6 @@ int main()
                 break;
             }
         }
-
-        //char title_str[MAX_TITLE_LENGTH];
-        //snprintf(title_str, MAX_TITLE_LENGTH, "X: %.17g, Y: %.17g, Size: %.17g, Iterations: %d", center_x, center_y, size, iterations);
-        //SDL_SetWindowTitle(window, title_str);
 
         // Render mandelbrot
 
@@ -883,9 +876,6 @@ int main()
                     }
                 }
 
-                // TODO: Error handling
-                SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
-                SDL_RenderClear(renderer);
                 if (state == STATE_PREVIEW || SHOW_PREVIEW_WHEN_RENDERING)
                 {
                     uint8_t *pixels;
