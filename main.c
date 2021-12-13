@@ -3,28 +3,20 @@
 // Welcome to Mandelbrot, with big floats. This is a work in progress, so in the
 // meantime, here's a TODO list of things I still need to do.
 //
-// TODO: Better iteration calculation
 // TODO: Documentation
-// TODO: Make movie
 // And of course, TODO: Make video.
 //
-// DEPENDENCIES
-// We depend on SDL2 and SDL2_image, both of which was downloaded from Homebrew
-// on the author's machine. Aside from that, we only depend on the stdlib,
-// as well as POSIX threads. C11 threads were not available on the author's Mac.
-
-#include "SDL2/SDL_video.h"
-#include <SDL2/SDL.h>
-#include <SDL2/SDL_image.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <stdint.h>
-#include <stdbool.h>
-#include <pthread.h>
-#include <math.h>
-#include <assert.h>
-
-// RENDERING CONFIGURATION
+// COMPILATION
+//
+// You can compile this program with make, but you'll probably need to change
+// the Makefile to suit your system. Before doing so, install SDL2 and
+// SDL2_image. Then configure the Makefile to point to your system's include
+// files and library files (such as .so on Linux or .dylib on Mac).
+//
+// The Makefile also uses clang; either install clang or change that to any
+// compiler that you use, such as gcc.
+//
+// OUTLINE
 //
 // This version of the program has two modes; preview and full-sized rendering.
 // Both modes are nearly identical except for the resolution in which they are
@@ -32,6 +24,438 @@
 // to run at 60fps, navigatable by keyboard. However, ever since the switch from
 // doubles to big floats, the program does not run fast enough to enjoy that
 // level of interactivity. As such, both modes operate on click-to-zoom.
+//
+// Controls:
+// H - Return home
+// Left click - Zoom in
+// Right click - Zoom out
+// Tab - Change between preview and full resolution (may take a long time!)
+//
+// There's actually a movie mode as well TODO:
+//
+// BIG FLOAT
+//
+// One of the core parts of Mandelbrot is the floating point precision, so it
+// makes sense to go over them first.
+//
+// We do not use any floating points in our program; instead, we have an array
+// of uint64s, and then we simply imagine the decimal point to be in-between
+// the first uint64 and the second. That way our calculations are immensely
+// simplified. Adding and subtracting can ignore the decimal point entirely,
+// while multiplication just involves taking a slice of the resulting bits.
+//
+// While we can technically achieve abitrary precision, it was easier to limit
+// ourselves to 256-bits and 512-bits for now. You may also notice that we are
+// wasting quite a lot of bits by having 64 bits be part of the "whole number".
+// However, doing so makes the program a lot simpler and seems to be good enough
+// for now.
+//
+// Finally, we use a sign-magnitude representation instead of 2s complement.
+// While this makes adding and subtracting much harder, it makes multiplication
+// much easier. I'm unsure if this was a good tradeoff, but it seems like most
+// bignum libraries use sign-magnitude as well.
+
+#include <stdint.h>
+
+enum sign
+{
+    SIGN_NEG,
+    SIGN_ZERO,
+    SIGN_POS
+};
+
+struct fp256
+{
+    enum sign sign;
+    uint64_t man[4];
+};
+
+struct fp512
+{
+    enum sign sign;
+    uint64_t man[8];
+};
+
+// Let's start with unsigned addition. This is the exciting bit; we get to use
+// some easy inline assembly! As you can see, we simply add the LSB (Least
+// Significant Bit) of a and b, saving the carry, and then repeat all the way
+// to the MSB (Most Significant Bit) while propogating the carry.
+//
+// We do use quite a lot of registers here, which is another reason for fixing
+// ourselves at 512-bits max. ARM only has about 30 usage registers, so we're
+// quite near the limit. Any more, and we'll have to start writing code to spill
+// registers mid-way through the calculation.
+
+struct fp512 fp_uadd512(struct fp512 a, struct fp512 b)
+{
+    struct fp512 c;
+    asm("ADDS %7, %15, %23\n"
+        "ADCS %6, %14, %22\n"
+        "ADCS %5, %13, %21\n"
+        "ADCS %4, %12, %20\n"
+        "ADCS %3, %11, %19\n"
+        "ADCS %2, %10, %18\n"
+        "ADCS %1, %9, %17\n"
+        "ADC  %0, %8, %16"
+        :
+        "=&r"(c.man[0]), // 0
+        "=&r"(c.man[1]), // 1
+        "=&r"(c.man[2]), // 2
+        "=&r"(c.man[3]), // 3
+        "=&r"(c.man[4]), // 4
+        "=&r"(c.man[5]), // 5
+        "=&r"(c.man[6]), // 6
+        "=&r"(c.man[7])  // 7
+        :
+        "r"  (a.man[0]), // 8
+        "r"  (a.man[1]), // 9
+        "r"  (a.man[2]), // 10
+        "r"  (a.man[3]), // 11
+        "r"  (a.man[4]), // 12
+        "r"  (a.man[5]), // 13
+        "r"  (a.man[6]), // 14
+        "r"  (a.man[7]), // 15
+        "r"  (b.man[0]), // 16
+        "r"  (b.man[1]), // 17
+        "r"  (b.man[2]), // 18
+        "r"  (b.man[3]), // 19
+        "r"  (b.man[4]), // 20
+        "r"  (b.man[5]), // 21
+        "r"  (b.man[6]), // 22
+        "r"  (b.man[7])  // 23
+        :
+        "cc");
+    return c;
+}
+
+// We do the same thing for 256-bits, but we will use a macro to help us reuse
+// the same code for both adding (ADD/ADC) and subtracting (SUB/SBC).
+//
+// Do note that since we are using signed-magnitude comparison, we must ensure
+// that a > b before subtracting, so as to ensure that the resulting magnitude
+// does not wrap around in 2s complement representation. The only exception is
+// if we're comparing a and b, in which we will throw away the results after
+// (and not use it as a magnitude).
+
+#define DEF_FP_UADDSUB256(name, op, opc) struct fp256 fp_u##name##256(struct fp256 a, struct fp256 b) \
+{ \
+    struct fp256 c; \
+    asm(#op  "S %3, %7, %11\n" \
+        #opc "S %2, %6, %10\n" \
+        #opc "S %1, %5, %9\n" \
+        #opc "  %0, %4, %8" \
+        : \
+        "=&r"(c.man[0]), /* 0 */ \
+        "=&r"(c.man[1]), /* 1 */ \
+        "=&r"(c.man[2]), /* 2 */ \
+        "=&r"(c.man[3])  /* 3 */ \
+        : \
+        "r"  (a.man[0]), /* 4 */ \
+        "r"  (a.man[1]), /* 5 */ \
+        "r"  (a.man[2]), /* 6 */ \
+        "r"  (a.man[3]), /* 7 */ \
+        "r"  (b.man[0]), /* 8 */ \
+        "r"  (b.man[1]), /* 9 */ \
+        "r"  (b.man[2]), /* 10 */ \
+        "r"  (b.man[3])  /* 11 */ \
+        : \
+        "cc"); \
+    return c; \
+}
+DEF_FP_UADDSUB256(add, ADD, ADC);
+DEF_FP_UADDSUB256(sub, SUB, SBC);
+#undef DEF_FP_UADDSUB256
+
+// This allows us to compare the magnitudes of two numbers (note that this
+// function is unsigned and ignores the signs of the numbers)! We can do so
+// by simply performing (a - b). Then, if it's negative, b must be more than a.
+// If it's non-negative, it can either be 0 (same) or a is more than b.
+
+enum cmp
+{
+    CMP_SAME,
+    CMP_A_BIG,
+    CMP_B_BIG
+};
+
+#include <string.h>
+#include <stdbool.h>
+
+enum cmp fp_ucmp256(struct fp256 a, struct fp256 b)
+{
+    static const uint64_t zero[4]; // Static variables are 0 by default
+    struct fp256 c = fp_usub256(a, b);
+    bool is_negative = (c.man[0] >> 63) == 1;
+    if (is_negative)
+        return CMP_B_BIG;
+    else
+        if (memcmp(c.man, zero, 4 * sizeof(uint64_t)) == 0)
+            return CMP_SAME;
+        else
+            return CMP_A_BIG;
+}
+
+// With unsigned add, sub and cmp functions, we can use this to build a signed
+// addition function. First, we check for the special case in which one or both
+// of the inputs are 0:
+
+#include <assert.h>
+
+struct fp256 fp_sadd256(struct fp256 a, struct fp256 b)
+{
+    if (a.sign == SIGN_ZERO && b.sign == SIGN_ZERO)
+        return a;
+    if (b.sign == SIGN_ZERO)
+        return a;
+    if (a.sign == SIGN_ZERO)
+        return b;
+
+// First, if both are of the same sign, we can simply add the magnitudes and
+// inherit the sign.
+
+    if ((a.sign == SIGN_POS && b.sign == SIGN_POS) ||
+        (a.sign == SIGN_NEG && b.sign == SIGN_NEG))
+    {
+        struct fp256 c = fp_uadd256(a, b);
+        c.sign = a.sign;
+        return c;
+    }
+
+// At this point, there are only 2 possibilities: -a and +b, or +a and -b.
+
+    assert((a.sign == SIGN_POS && b.sign == SIGN_NEG) ||
+           (a.sign == SIGN_NEG && b.sign == SIGN_POS));
+
+// It should be obvious that if we have a - b or b - a, if a = b, then the
+// answer is 0.
+
+    enum cmp cmp = fp_ucmp256(a, b);
+    if (cmp == CMP_SAME)
+        return (struct fp256) { SIGN_ZERO, {0} };
+
+// And then we can simply follow this chart for the remaining possibilities:
+// https://www.tutorialspoint.com/explain-the-performance-of-addition-and-subtraction-with-signed-magnitude-data-in-computer-architecture
+
+    if (a.sign == SIGN_POS && b.sign == SIGN_NEG)
+    {
+        if (cmp == CMP_A_BIG)
+        {
+            struct fp256 c = fp_usub256(a, b);
+            c.sign = SIGN_POS;
+            return c;
+        }
+        else
+        {
+            struct fp256 c = fp_usub256(b, a);
+            c.sign = SIGN_NEG;
+            return c;
+        }
+    }
+    else
+    {
+        if (cmp == CMP_A_BIG)
+        {
+            struct fp256 c = fp_usub256(a, b);
+            c.sign = SIGN_NEG;
+            return c;
+        }
+        else
+        {
+            struct fp256 c = fp_usub256(b, a);
+            c.sign = SIGN_POS;
+            return c;
+        }
+    }
+}
+
+// We can build upon signed addition to created signed subtraction, by simply
+// inverting the second operand's sign.
+
+struct fp256 fp_sinv256(struct fp256 a)
+{
+    if (a.sign == SIGN_POS) a.sign = SIGN_NEG;
+    else if (a.sign == SIGN_NEG) a.sign = SIGN_POS;
+    return a;
+}
+
+struct fp256 fp_ssub256(struct fp256 a, struct fp256 b)
+{
+    return fp_sadd256(a, fp_sinv256(b));
+}
+
+// Now for the big gun; multiplication. There exists harder and more efficient
+// multiplication algorithms, but I'll go with the naive, elementary-school-like
+// way of doing it.
+
+struct fp256 fp_smul256(struct fp256 a, struct fp256 b)
+{
+
+// First, the obvious x * 0 = 0.
+
+    if (a.sign == SIGN_ZERO || b.sign == SIGN_ZERO)
+        return (struct fp256) { SIGN_ZERO, {0} };
+
+// Next, we calculate the magnitude of a * the magnitude of b to create our
+// final magnitude (c). We create a 512-bit number to hold all the possible
+// bits of a 256 * 256 bit multiplication.
+
+    struct fp512 c = {0};
+
+// Just like in elementary school, we literally just multiply each word (digit)
+// with all the words in the other operand.
+
+    for (int i = 3; i >= 0; i--) // a
+    {
+        for (int j = 3; j >= 0; j--) // b
+        {
+
+// First, we use a 128-bit number to multiply our two 64-bit words (digit). We
+// do this because ARM's 128-bit multiplication was so hard to understand. Plus,
+// it's portable!
+//
+// Also yes, we could have done this for adding as well, but 1) inline assembly
+// is kinda fun and 2) I'm unsure if the compiler would have generated the
+// optimal ADDS/ADCS code.
+
+#ifndef __SIZEOF_INT128__
+#error Your compiler or platform does not support 128 bits.
+#endif
+
+            __uint128_t mult = (__uint128_t)a.man[i] * (__uint128_t)b.man[j];
+
+// We then put this 128-bit number into 2 64-bit words (digits), and that makes
+// up 1 "row", like you normally see in pencil-and-paper multiplication. Then
+// we can simply repeatedly accumulate this into the final answer.
+
+            int low_offset = 7 - (3 - i) - (3 - j);
+            assert(low_offset >= 1);
+            int high_offset = low_offset - 1;
+
+            struct fp512 temp = {0};
+            temp.man[low_offset] = (uint64_t)mult;
+            temp.man[high_offset] = mult >> 64;
+
+            c = fp_uadd512(c, temp);
+        }
+    }
+
+// With the magnitude calculated, finding the sign of the result is trivial:
+
+    enum sign sign;
+    if (a.sign == SIGN_NEG && b.sign == SIGN_NEG)
+        sign = SIGN_POS;
+    else if (a.sign == SIGN_NEG || b.sign == SIGN_NEG)
+        sign = SIGN_NEG;
+    else
+        sign = SIGN_POS;
+
+// Finally, we need to convert the 512-bit result back into 256-bits. Take note
+// that 1.234 * 5.678 = 12.345678 (the numbers represent the word position),
+// and so we need to take the slice [2, 5].
+
+    struct fp256 c256;
+    c256.sign = sign;
+    memcpy(c256.man, c.man + 1, 4 * sizeof(uint64_t));
+
+    return c256;
+}
+
+struct fp256 fp_ssqr256(struct fp256 a)
+{
+    return fp_smul256(a, a);
+}
+
+// There's an easier way to multiply or divide by 2 however; bit shifting!
+// For shifting to the right (ASR), we first shift the least significant word
+// to the right, then take the least signifiant bit of the second word, and then
+// put it at the most significant bit of the least significant word.
+//
+// In effect, it's as if we take the entire 256 bits and shift it once to the
+// right, where the original least significant bit gets ignored, while the
+// new most significant bit is 0.
+
+struct fp256 fp_asr256(struct fp256 a)
+{
+    a.man[3] >>= 1;
+    a.man[3] |= (a.man[2] & 0x1) << 63;
+    a.man[2] >>= 1;
+    a.man[2] |= (a.man[1] & 0x1) << 63;
+    a.man[1] >>= 1;
+    a.man[1] |= (a.man[0] & 0x1) << 63;
+    a.man[0] >>= 1;
+    return a;
+}
+
+struct fp256 fp_asl256(struct fp256 a)
+{
+    a.man[0] <<= 1;
+    a.man[0] |= (a.man[1] & 0x8000000000000000) >> 63;
+    a.man[1] <<= 1;
+    a.man[1] |= (a.man[2] & 0x8000000000000000) >> 63;
+    a.man[2] <<= 1;
+    a.man[2] |= (a.man[3] & 0x8000000000000000) >> 63;
+    a.man[3] <<= 1;
+    return a;
+}
+
+// Finally, to convert a signed into a number, first we remove the sign (and
+// store it as the sign enum), then we put the magnitude into the first word
+// of the mantissa (which is defined to be the whole number).
+
+struct fp256 int_to_fp256(int a)
+{
+    if (a == 0)
+        return (struct fp256){ SIGN_ZERO, {0} };
+    
+    struct fp256 b = {0};
+    if (a < 0)
+    {
+        b.sign = SIGN_NEG;
+        a = -a;
+    }
+    else
+        b.sign = SIGN_POS;
+    
+    b.man[0] = (uint64_t)a;
+    return b;
+}
+
+// With that, we can use big floats to implement complex numbers. The
+// implementation is rather trivial:
+
+struct complex
+{
+    struct fp256 x;
+    struct fp256 y;
+};
+
+struct complex complex_add(struct complex a, struct complex b)
+{
+    return (struct complex) { fp_sadd256(a.x, b.x), fp_sadd256(a.y, b.y) };
+}
+
+struct complex complex_mul(struct complex a, struct complex b)
+{
+    return (struct complex)
+    {
+        fp_ssub256(fp_smul256(a.x, b.x), fp_smul256(a.y, b.y)),
+        fp_sadd256(fp_smul256(a.x, b.y), fp_smul256(b.x, a.y))
+    };
+}
+
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wconversion"
+#include "SDL2/SDL_video.h"
+#include <SDL2/SDL.h>
+#include <SDL2/SDL_image.h>
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include "stb_image_write.h"
+#include <stdio.h>
+#include <pthread.h>
+#include <math.h>
+#pragma clang diagnostic pop
+
+// RENDERING CONFIGURATION
 //
 // First, let's define some properties for full-sized rendering. We assume that
 // full-size is 1:1 to the window, and thus window size = full-size dimensions.
@@ -179,6 +603,16 @@ const struct color gradient_stops[GRADIENT_STOP_COUNT + 1] =
 #define ZOOM_IMAGE_SIZE_X 225
 #define ZOOM_IMAGE_SIZE_Y 150
 
+#define MOVIE 1
+#define MOVIE_FULL_SHOW_X_INTERVAL 75
+#define MOVIE_INITIAL_CENTER_X (struct fp256){ SIGN_NEG, { 1, 0xFFF1315BACAC51F1, 0xD039000000000000 } }
+#define MOVIE_INITIAL_CENTER_Y (struct fp256){ SIGN_NEG, { 0, 0x0000000E217005DA, 0x86D3000000000000 } }
+#define MOVIE_ZOOM_PER_FRAME (struct fp256){ SIGN_POS, { 0, 0x8000000000000000 } } // 0.5
+#define MOVIE_PREFIX "movie/frame"
+#define MOVIE_PREFIX_LEN 11
+
+#define INITIAL_ITERATIONS 64
+
 // GRADIENT IMPLEMENTATION
 //
 // We have already defined the structure of color in GRADIENT CONFIGURATION,
@@ -226,292 +660,6 @@ struct color gradient_color(struct gradient gradient, float x)
     return color_lerp(gradient.stops[stop_prev], gradient.stops[stop_next], stop_x);
 }
 
-// BigFloat
-
-enum sign
-{
-    SIGN_NEG,
-    SIGN_ZERO,
-    SIGN_POS
-};
-
-struct fp256
-{
-    enum sign sign;
-    uint64_t man[4];
-};
-
-struct fp512
-{
-    enum sign sign;
-    uint64_t man[8];
-};
-
-#define DEF_FP_UADDSUB256(name, op, opc) struct fp256 fp_u##name##256(struct fp256 a, struct fp256 b) \
-{ \
-    struct fp256 c; \
-    asm(#op  "S %3, %7, %11\n" \
-        #opc "S %2, %6, %10\n" \
-        #opc "S %1, %5, %9\n" \
-        #opc "  %0, %4, %8" \
-        : \
-        "=&r"(c.man[0]), /* 0 */ \
-        "=&r"(c.man[1]), /* 1 */ \
-        "=&r"(c.man[2]), /* 2 */ \
-        "=&r"(c.man[3])  /* 3 */ \
-        : \
-        "r"  (a.man[0]), /* 4 */ \
-        "r"  (a.man[1]), /* 5 */ \
-        "r"  (a.man[2]), /* 6 */ \
-        "r"  (a.man[3]), /* 7 */ \
-        "r"  (b.man[0]), /* 8 */ \
-        "r"  (b.man[1]), /* 9 */ \
-        "r"  (b.man[2]), /* 10 */ \
-        "r"  (b.man[3])  /* 11 */ \
-        : \
-        "cc"); \
-    return c; \
-}
-DEF_FP_UADDSUB256(add, ADD, ADC);
-// Note: a > b must be true if using sub, except if for comparing.
-DEF_FP_UADDSUB256(sub, SUB, SBC);
-#undef DEF_FP_UADDSUB256
-
-struct fp512 fp_uadd512(struct fp512 a, struct fp512 b)
-{
-    struct fp512 c;
-    asm("ADDS %7, %15, %23\n"
-        "ADCS %6, %14, %22\n"
-        "ADCS %5, %13, %21\n"
-        "ADCS %4, %12, %20\n"
-        "ADCS %3, %11, %19\n"
-        "ADCS %2, %10, %18\n"
-        "ADCS %1, %9, %17\n"
-        "ADC  %0, %8, %16"
-        :
-        "=&r"(c.man[0]), // 0
-        "=&r"(c.man[1]), // 1
-        "=&r"(c.man[2]), // 2
-        "=&r"(c.man[3]), // 3
-        "=&r"(c.man[4]), // 4
-        "=&r"(c.man[5]), // 5
-        "=&r"(c.man[6]), // 6
-        "=&r"(c.man[7])  // 7
-        :
-        "r"  (a.man[0]), // 8
-        "r"  (a.man[1]), // 9
-        "r"  (a.man[2]), // 10
-        "r"  (a.man[3]), // 11
-        "r"  (a.man[4]), // 12
-        "r"  (a.man[5]), // 13
-        "r"  (a.man[6]), // 14
-        "r"  (a.man[7]), // 15
-        "r"  (b.man[0]), // 16
-        "r"  (b.man[1]), // 17
-        "r"  (b.man[2]), // 18
-        "r"  (b.man[3]), // 19
-        "r"  (b.man[4]), // 20
-        "r"  (b.man[5]), // 21
-        "r"  (b.man[6]), // 22
-        "r"  (b.man[7])  // 23
-        :
-        "cc");
-    return c;
-}
-
-enum cmp
-{
-    CMP_SAME,
-    CMP_A_BIG,
-    CMP_B_BIG
-};
-
-enum cmp fp_ucmp256(struct fp256 a, struct fp256 b)
-{
-    static const uint64_t zero[4]; // static is 0 by default
-    struct fp256 c = fp_usub256(a, b);
-    bool is_negative = (c.man[0] >> 63) == 1;
-    if (is_negative)
-        return CMP_B_BIG;
-    else
-        if (memcmp(c.man, zero, 4 * sizeof(uint64_t)) == 0)
-            return CMP_SAME;
-        else
-            return CMP_A_BIG;
-}
-
-struct fp256 fp_sadd256(struct fp256 a, struct fp256 b)
-{
-    if (a.sign == SIGN_ZERO && b.sign == SIGN_ZERO)
-        return a;
-    if (b.sign == SIGN_ZERO)
-        return a;
-    if (a.sign == SIGN_ZERO)
-        return b;
-    if ((a.sign == SIGN_POS && b.sign == SIGN_POS) ||
-        (a.sign == SIGN_NEG && b.sign == SIGN_NEG))
-    {
-        struct fp256 c = fp_uadd256(a, b);
-        c.sign = a.sign;
-        return c;
-    }
-
-    assert((a.sign == SIGN_POS && b.sign == SIGN_NEG) ||
-           (a.sign == SIGN_NEG && b.sign == SIGN_POS));
-    enum cmp cmp = fp_ucmp256(a, b);
-    if (cmp == CMP_SAME)
-        return (struct fp256) { SIGN_ZERO, {0} };
-    
-    if (a.sign == SIGN_POS && b.sign == SIGN_NEG)
-    {
-        if (cmp == CMP_A_BIG)
-        {
-            struct fp256 c = fp_usub256(a, b);
-            c.sign = SIGN_POS;
-            return c;
-        }
-        else
-        {
-            struct fp256 c = fp_usub256(b, a);
-            c.sign = SIGN_NEG;
-            return c;
-        }
-    }
-    else
-    {
-        if (cmp == CMP_A_BIG)
-        {
-            struct fp256 c = fp_usub256(a, b);
-            c.sign = SIGN_NEG;
-            return c;
-        }
-        else
-        {
-            struct fp256 c = fp_usub256(b, a);
-            c.sign = SIGN_POS;
-            return c;
-        }
-    }
-}
-
-struct fp256 fp_sinv256(struct fp256 a)
-{
-    if (a.sign == SIGN_POS) a.sign = SIGN_NEG;
-    else if (a.sign == SIGN_NEG) a.sign = SIGN_POS;
-    return a;
-}
-
-struct fp256 fp_ssub256(struct fp256 a, struct fp256 b)
-{
-    return fp_sadd256(a, fp_sinv256(b));
-}
-
-struct fp256 fp_smul256(struct fp256 a, struct fp256 b)
-{
-    if (a.sign == SIGN_ZERO || b.sign == SIGN_ZERO)
-        return (struct fp256) { SIGN_ZERO, {0} };
-
-    enum sign sign;
-    if (a.sign == SIGN_NEG && b.sign == SIGN_NEG)
-        sign = SIGN_POS;
-    else if (a.sign == SIGN_NEG || b.sign == SIGN_NEG)
-        sign = SIGN_NEG;
-    else
-        sign = SIGN_POS;
-
-    struct fp512 c = {0};
-    for (int i = 3; i >= 0; i--) // a
-    {
-        for (int j = 3; j >= 0; j--) // b
-        {
-            int low_offset = 7 - (3 - i) - (3 - j);
-            assert(low_offset >= 1);
-            int high_offset = low_offset - 1;
-
-            __uint128_t mult = (__uint128_t)a.man[i] * (__uint128_t)b.man[j];
-            struct fp512 temp = {0};
-            temp.man[low_offset] = (uint64_t)mult;
-            temp.man[high_offset] = mult >> 64;
-
-            c = fp_uadd512(c, temp);
-        }
-    }
-
-    struct fp256 c256;
-    c256.sign = sign;
-    memcpy(c256.man, c.man + 1, 4 * sizeof(uint64_t));
-
-    return c256;
-}
-
-struct fp256 fp_ssqr256(struct fp256 a)
-{
-    return fp_smul256(a, a);
-}
-
-struct fp256 fp_asr256(struct fp256 a)
-{
-    a.man[3] >>= 1;
-    a.man[3] |= (a.man[2] & 0x1) << 63;
-    a.man[2] >>= 1;
-    a.man[2] |= (a.man[1] & 0x1) << 63;
-    a.man[1] >>= 1;
-    a.man[1] |= (a.man[0] & 0x1) << 63;
-    a.man[0] >>= 1;
-    return a;
-}
-
-struct fp256 fp_asl256(struct fp256 a)
-{
-    a.man[0] <<= 1;
-    a.man[0] |= (a.man[1] & 0x8000000000000000) >> 63;
-    a.man[1] <<= 1;
-    a.man[1] |= (a.man[2] & 0x8000000000000000) >> 63;
-    a.man[2] <<= 1;
-    a.man[2] |= (a.man[3] & 0x8000000000000000) >> 63;
-    a.man[3] <<= 1;
-    return a;
-}
-
-struct fp256 int_to_fp256(int a)
-{
-    if (a == 0)
-        return (struct fp256){ SIGN_ZERO, {0} };
-    
-    struct fp256 b = {0};
-    if (a < 0)
-    {
-        b.sign = SIGN_NEG;
-        a = -a;
-    }
-    else
-        b.sign = SIGN_POS;
-    
-    b.man[0] = (uint64_t)a;
-    return b;
-}
-
-// Complex
-
-struct complex
-{
-    struct fp256 x;
-    struct fp256 y;
-};
-
-struct complex complex_add(struct complex a, struct complex b)
-{
-    return (struct complex) { fp_sadd256(a.x, b.x), fp_sadd256(a.y, b.y) };
-}
-
-struct complex complex_mul(struct complex a, struct complex b)
-{
-    return (struct complex)
-    {
-        fp_ssub256(fp_smul256(a.x, b.x), fp_smul256(a.y, b.y)),
-        fp_sadd256(fp_smul256(a.x, b.y), fp_smul256(b.x, a.y))
-    };
-}
 
 // Thread
 
@@ -674,10 +822,11 @@ int main()
 
     // Main loop
     struct fp256 size = INITIAL_SIZE;
-    struct fp256 center_x = INITIAL_CENTER_X;
-    struct fp256 center_y = INITIAL_CENTER_Y;
-    unsigned long long iterations = 64;
-    unsigned long long zoom = 1;
+    struct fp256 center_x = MOVIE ? MOVIE_INITIAL_CENTER_X : INITIAL_CENTER_X;
+    struct fp256 center_y = MOVIE ? MOVIE_INITIAL_CENTER_Y : INITIAL_CENTER_Y;
+    unsigned long long iterations = INITIAL_ITERATIONS;
+    unsigned long long zoom = 0;
+    int movie_current_frame = 1;
 
     static const int full_pixels_size = WINDOW_WIDTH * WINDOW_HEIGHT * 4;
     static const int preview_pixels_size = PREVIEW_WIDTH * PREVIEW_HEIGHT * 4;
@@ -696,7 +845,7 @@ int main()
         STATE_PREVIEW,
         STATE_FULL
     };
-    enum state state = STATE_PREVIEW;
+    enum state state = STATE_FULL;
     bool haveToRender = true;
 
     bool running = true;
@@ -721,6 +870,8 @@ int main()
                 
                 case SDL_KEYDOWN:
                 {
+                    if (MOVIE)
+                        break;
                     switch (event.key.keysym.scancode)
                     {
                         case SDL_SCANCODE_TAB:
@@ -743,8 +894,8 @@ int main()
                             center_x = INITIAL_CENTER_X;
                             center_y = INITIAL_CENTER_Y;
                             size = INITIAL_SIZE;
-                            iterations = 32;
-                            zoom = 1;
+                            iterations = INITIAL_ITERATIONS;
+                            zoom = 0;
                             // Not doing memset is intended, for the visual effect.
                         }
                         break;
@@ -757,6 +908,8 @@ int main()
 
                 case SDL_MOUSEBUTTONUP:
                 {
+                    if (MOVIE)
+                        break;
                     if (event.button.button == SDL_BUTTON_LEFT)
                     {
                         haveToRender = true;
@@ -764,9 +917,9 @@ int main()
                         center_x = calculateMathPos(mouse_x, WINDOW_WIDTH_RECIPROCAL, size_x, center_x);
                         center_y = calculateMathPos(WINDOW_HEIGHT - mouse_y, WINDOW_HEIGHT_RECIPROCAL, size, center_y);
                         size = fp_smul256(size, ZOOM);
-                        iterations += iterations / 2; // TODO: Less hardcoded
-                        zoom *= 4;
-                        printf("Zoom: %llu\n", zoom);
+                        iterations += 64; // TODO: Iterations setting
+                        zoom++;
+                        printf("Zoom: 4^%llu\n", zoom);
                         memset(full_stored_pixels, 0, full_pixels_size);
                         memset(preview_stored_pixels, 0, preview_pixels_size);
                     }
@@ -774,9 +927,9 @@ int main()
                     {
                         haveToRender = true;
                         size = fp_smul256(size, ZOOM_RECIPROCAL);
-                        iterations -= iterations / 3;
-                        zoom /= 4;
-                        printf("Zoom: %llu\n", zoom);
+                        iterations -= 64; // TODO: Iterations setting
+                        zoom--;
+                        printf("Zoom: 4^%llu\n", zoom);
                         memset(full_stored_pixels, 0, full_pixels_size);
                         memset(preview_stored_pixels, 0, preview_pixels_size);
                     }
@@ -831,6 +984,11 @@ int main()
                 fputs("Found invalid state when rendering.", stderr);
                 exit_code = EXIT_FAILURE;
                 goto cleanup;
+            }
+
+            if (MOVIE)
+            {
+                show_x_interval = MOVIE_FULL_SHOW_X_INTERVAL;
             }
             
             for (int x = 0; x < thread_x_size; x += show_x_interval)
@@ -919,6 +1077,26 @@ int main()
                 SDL_RenderPresent(renderer);
             }
 
+            if (MOVIE)
+            {
+                static const int movie_path_len = MOVIE_PREFIX_LEN + 4 + 4 + 1;
+                char movie_path[movie_path_len]; // + 0001 + .png + \0
+                snprintf(movie_path, movie_path_len, MOVIE_PREFIX "%04d.png", movie_current_frame);
+                movie_current_frame++;
+                if (stbi_write_png(movie_path, WINDOW_WIDTH, WINDOW_HEIGHT, 4, full_stored_pixels, WINDOW_WIDTH * 4) == 0)
+                {
+                    fprintf(stderr, "Unable to write to frame file for the movie. Continuing just in case...");
+                }
+
+                haveToRender = true;
+                size = fp_smul256(size, MOVIE_ZOOM_PER_FRAME);
+                iterations += 64; // TODO: Iterations setting
+                zoom++;
+                printf("Zoom: 4^%llu\n", zoom);
+                memset(full_stored_pixels, 0, full_pixels_size);
+                memset(preview_stored_pixels, 0, preview_pixels_size);
+            }
+
             uint64_t end_time = SDL_GetPerformanceCounter();
             float time_taken = (float)(end_time - begin_time) / (float)SDL_GetPerformanceFrequency() * 1000;
             printf("%s render completed. Time taken: %fms. Iterations: %llu\n", (state == STATE_PREVIEW) ? "Preview" : "Full", time_taken, iterations);
@@ -932,7 +1110,7 @@ int main()
         }
 
         // Show zoom highlight
-        if (cursor_in_window)
+        if (cursor_in_window && !MOVIE)
         {
             SDL_Rect dest_zoom_rect =
             {
