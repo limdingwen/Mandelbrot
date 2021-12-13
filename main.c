@@ -123,7 +123,7 @@ const struct thread_block preview_thread_blocks[THREADS] =
 // optimiser to use a mask instead. This is important since gradient is
 // calculated for every pixel on the screen.
 
-#define GRADIENT_ITERATION_SIZE 64 // Use 2^x for best performance
+#define GRADIENT_ITERATION_SIZE 16 // Use 2^x for best performance
 
 // Next, we define the actual gradient, in 0-255 RGB format. We also duplicate
 // the first and last stops, so that it will be easier for the program to loop
@@ -215,12 +215,12 @@ struct gradient
 
 // For a particular point on a looping gradient, return a color.
 
-struct color gradient_color(struct gradient gradient, int x)
+struct color gradient_color(struct gradient gradient, float x)
 {
 
 // As said before, first we perform a modulus on x so to make the gradient loop.
 
-    x %= gradient.size;
+    x = fmodf(x, (float)gradient.size);
 
 // 
 
@@ -465,6 +465,18 @@ struct fp256 fp_asr256(struct fp256 a)
     return a;
 }
 
+struct fp256 fp_asl256(struct fp256 a)
+{
+    a.man[0] <<= 1;
+    a.man[0] |= (a.man[1] & 0x8000000000000000) >> 63;
+    a.man[1] <<= 1;
+    a.man[1] |= (a.man[2] & 0x8000000000000000) >> 63;
+    a.man[2] <<= 1;
+    a.man[2] |= (a.man[3] & 0x8000000000000000) >> 63;
+    a.man[3] <<= 1;
+    return a;
+}
+
 struct fp256 int_to_fp256(int a)
 {
     if (a == 0)
@@ -507,7 +519,11 @@ struct complex complex_mul(struct complex a, struct complex b)
 
 struct complex complex_sqr(struct complex a)
 {
-    return complex_mul(a, a);
+    return (struct complex)
+    {
+        fp_ssub256(fp_smul256(a.x, a.x), fp_smul256(a.y, a.y)),
+        fp_asl256(fp_smul256(a.x, a.y))
+    };
 }
 
 // Only returns the whole number part
@@ -586,7 +602,7 @@ void *thread(void *arg)
                     GRADIENT_ITERATION_SIZE,
                     gradient_stops
                 };
-                color = gradient_color(gradient, (int)result.escape_iterations); // TODO: If got problems, make this unsigned long long
+                color = gradient_color(gradient, sqrtf((float)result.escape_iterations)); // TODO: If got problems, make this unsigned long long
             }
             
             int r_offset = (screen_y*data->width + screen_x)*4;
