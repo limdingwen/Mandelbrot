@@ -460,8 +460,8 @@ struct complex complex_mul(struct complex a, struct complex b)
 // First, let's define some properties for full-sized rendering. We assume that
 // full-size is 1:1 to the window, and thus window size = full-size dimensions.
 
-#define WINDOW_WIDTH 900
-#define WINDOW_HEIGHT 600
+#define WINDOW_WIDTH 1920
+#define WINDOW_HEIGHT 1080
 
 // Here, we also define reciprocals (1/x) of the width and height, as our big
 // float implementation is currently unable to divide; only multiply. We will
@@ -469,13 +469,14 @@ struct complex complex_mul(struct complex a, struct complex b)
 // the raw hexadecimal value of the big float as converting from a decimal
 // value is too difficult.
 
-#define WINDOW_WIDTH_RECIPROCAL (struct fp256){ SIGN_POS,   { 0, 0x0048d159e26af37c, 0x048d159e26af37c0, 0x48d159e26af37c04 } }
-#define WINDOW_HEIGHT_RECIPROCAL (struct fp256){ SIGN_POS,  { 0, 0x006d3a06d3a06d3a, 0x06d3a06d3a06d3a0, 0x6d3a06d3a06d3a06 } }
+#define WINDOW_WIDTH_RECIPROCAL  (struct fp256){ SIGN_POS,  { 0, 0x0022222222222222, 0x2222222222222222, 0x2222222222222222 } }
+#define WINDOW_HEIGHT_RECIPROCAL (struct fp256){ SIGN_POS,  { 0, 0x003CAE759203CAE7, 0x59203CAE759203CA, 0xE759203CAE759203 } }
 
 // This defines how many columns of pixels we draw before presenting a frame
 // to the user. Doing this after too little columns results in slower rendering.
+// This should be a factor of FULL_THREAD_X_SIZE below.
 
-#define FULL_SHOW_X_INTERVAL 5
+#define FULL_SHOW_X_INTERVAL 10
 
 // We are going to render multicore, and the simplest way to do so is to divide
 // up fixed blocks of pixels for each core to render.
@@ -492,21 +493,24 @@ struct thread_block
 
 const struct thread_block full_thread_blocks[THREADS] =
 {
-    { 0, 224, 0, 299 },
-    { 225, 449, 0, 299 },
-    { 450, 674, 0, 299 },
-    { 675, 899, 0, 299 },
-    { 0, 224, 300, 599 },
-    { 225, 449, 300, 599 },
-    { 450, 674, 300, 599 },
-    { 675, 899, 300, 599 },
+    { 0, 479, 0, 539 },
+    { 480, 959, 0, 539 },
+    { 960, 1439, 0, 539 },
+    { 1440, 1919, 0, 539 },
+    { 0, 479, 540, 1079 },
+    { 480, 959, 540, 1079 },
+    { 960, 1439, 540, 1079 },
+    { 1440, 1919, 540, 1079 },
 };
 
 // Since this is multicore, the program must be able to know how many columns
 // it should render for each block; it can't just loop through the entire
 // window.
+//
+// This must be the difference between x_start and x_end in full_thread_blocks.
+// And yes, all of them must have the same width.
 
-#define FULL_THREAD_X_SIZE 225
+#define FULL_THREAD_X_SIZE 480
 
 // When switching from preview to full-mode rendering, the user might want to
 // see a black screen so the progress of the render might be easier to see,
@@ -519,6 +523,7 @@ const struct thread_block full_thread_blocks[THREADS] =
 // preview mode differs in that it is much smaller and faster to render, but
 // is almost identical in every other way.
 
+// TODO: Need new resolution
 #define PREVIEW_WIDTH 240
 #define PREVIEW_HEIGHT 160
 #define PREVIEW_WIDTH_RECIPROCAL (struct fp256){ SIGN_POS,  { 0, 0x0111111111111111, 0x1111111111111111, 0x1111111111111111 } }
@@ -579,7 +584,7 @@ const struct color gradient_stops[GRADIENT_STOP_COUNT + 1] =
 #define INITIAL_CENTER_X (struct fp256){ SIGN_NEG, { 0, 0x8000000000000000, 0, 0 } } // -0.5
 #define INITIAL_CENTER_Y (struct fp256){ SIGN_ZERO, {0} } // 0
 #define INITIAL_SIZE (struct fp256){ SIGN_POS, { 2, 0, 0, 0 }} // 2
-#define SIZE_RATIO_X (struct fp256){ SIGN_POS, { 1, 0x8000000000000000, 0, 0 } } // 1.5
+#define SIZE_RATIO_X (struct fp256){ SIGN_POS, { 1, 0xC71C71C71C71C71C, 0x71C71C71C71C71C7, 0x1C71C71C71C71C71 } } // 1920/1080
 
 // The program uses a click-to-zoom mechanic, and thus we need to show the user
 // an image so the user knows where they will be zooming into. As with all
@@ -603,11 +608,12 @@ const struct color gradient_stops[GRADIENT_STOP_COUNT + 1] =
 #define ZOOM_IMAGE_SIZE_X 225
 #define ZOOM_IMAGE_SIZE_Y 150
 
-#define MOVIE 1
+#define MOVIE 0
 #define MOVIE_FULL_SHOW_X_INTERVAL 75
-#define MOVIE_INITIAL_CENTER_X (struct fp256){ SIGN_NEG, { 1, 0xFFF1315BACAC51F1, 0xD039000000000000 } }
-#define MOVIE_INITIAL_CENTER_Y (struct fp256){ SIGN_NEG, { 0, 0x0000000E217005DA, 0x86D3000000000000 } }
-#define MOVIE_ZOOM_PER_FRAME (struct fp256){ SIGN_POS, { 0, 0x8000000000000000 } } // 0.5
+// Coordinates from "Eye of the Universe"
+#define MOVIE_INITIAL_CENTER_X (struct fp256){ SIGN_POS, { 0, 0x5C38B7BB42D6E499, 0x134BFE5798655AA0, 0xCB8925EC9853B954 } }
+#define MOVIE_INITIAL_CENTER_Y (struct fp256){ SIGN_NEG, { 0, 0xA42D17BFC55EFB99, 0x9B8E8100EB7161E1, 0xCA1080A9F02EBC2A } }
+#define MOVIE_ZOOM_PER_FRAME   (struct fp256){ SIGN_POS, { 0, 0xFD0F413D0D9C5EF1, 0xDBE485CFBA44A80F, 0x30D9409A2D2212AF } } // 0.5 / 60
 #define MOVIE_PREFIX "movie/frame"
 #define MOVIE_PREFIX_LEN 11
 

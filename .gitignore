@@ -3,3 +3,6 @@ mandelbrot*
 test.png
 .vscode
 .git_backup
+compile_flags.txt
+.DS_Store
+leak_ignores.supp
