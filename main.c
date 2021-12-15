@@ -420,29 +420,6 @@ struct fp256 int_to_fp256(int a)
     return b;
 }
 
-// With that, we can use big floats to implement complex numbers. The
-// implementation is rather trivial:
-
-struct complex
-{
-    struct fp256 x;
-    struct fp256 y;
-};
-
-struct complex complex_add(struct complex a, struct complex b)
-{
-    return (struct complex) { fp_sadd256(a.x, b.x), fp_sadd256(a.y, b.y) };
-}
-
-struct complex complex_mul(struct complex a, struct complex b)
-{
-    return (struct complex)
-    {
-        fp_ssub256(fp_smul256(a.x, b.x), fp_smul256(a.y, b.y)),
-        fp_sadd256(fp_smul256(a.x, b.y), fp_smul256(b.x, a.y))
-    };
-}
-
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wconversion"
 #include "SDL2/SDL_video.h"
@@ -609,13 +586,14 @@ const struct color gradient_stops[GRADIENT_STOP_COUNT + 1] =
 #define ZOOM_IMAGE_SIZE_Y 150
 
 #define MOVIE 0
-#define MOVIE_FULL_SHOW_X_INTERVAL 75
+#define MOVIE_FULL_SHOW_X_INTERVAL 160
 // Coordinates from "Eye of the Universe"
 #define MOVIE_INITIAL_CENTER_X (struct fp256){ SIGN_POS, { 0, 0x5C38B7BB42D6E499, 0x134BFE5798655AA0, 0xCB8925EC9853B954 } }
 #define MOVIE_INITIAL_CENTER_Y (struct fp256){ SIGN_NEG, { 0, 0xA42D17BFC55EFB99, 0x9B8E8100EB7161E1, 0xCA1080A9F02EBC2A } }
 #define MOVIE_ZOOM_PER_FRAME   (struct fp256){ SIGN_POS, { 0, 0xFD0F413D0D9C5EF1, 0xDBE485CFBA44A80F, 0x30D9409A2D2212AF } } // 0.5 / 60
 #define MOVIE_PREFIX "movie/frame"
 #define MOVIE_PREFIX_LEN 11
+#define MOVIE_INITIAL_FRAME 543
 
 #define INITIAL_ITERATIONS 64
 
@@ -832,7 +810,17 @@ int main()
     struct fp256 center_y = MOVIE ? MOVIE_INITIAL_CENTER_Y : INITIAL_CENTER_Y;
     unsigned long long iterations = INITIAL_ITERATIONS;
     unsigned long long zoom = 0;
-    int movie_current_frame = 1;
+    int movie_current_frame = MOVIE_INITIAL_FRAME;
+
+    if (MOVIE)
+    {
+        for (int i = 0; i < MOVIE_INITIAL_FRAME - 1; i++)
+        {
+            size = fp_smul256(size, MOVIE_ZOOM_PER_FRAME);
+            iterations += 1; // TODO: Iterations setting
+            printf("Fast forward to frame %d...\n", i + 2);
+        }
+    }
 
     static const int full_pixels_size = WINDOW_WIDTH * WINDOW_HEIGHT * 4;
     static const int preview_pixels_size = PREVIEW_WIDTH * PREVIEW_HEIGHT * 4;
@@ -1096,9 +1084,8 @@ int main()
 
                 haveToRender = true;
                 size = fp_smul256(size, MOVIE_ZOOM_PER_FRAME);
-                iterations += 64; // TODO: Iterations setting
-                zoom++;
-                printf("Zoom: 4^%llu\n", zoom);
+                iterations += 1; // TODO: Iterations setting
+                printf("Frame: %d\n", movie_current_frame);
                 memset(full_stored_pixels, 0, full_pixels_size);
                 memset(preview_stored_pixels, 0, preview_pixels_size);
             }
