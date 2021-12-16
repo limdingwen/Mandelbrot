@@ -1,8 +1,3 @@
-movie*
-mandelbrot*
-test.png
-.vscode
-.git_backup
-compile_flags.txt
+movie
+mandelbrot
 .DS_Store
-leak_ignores.supp
