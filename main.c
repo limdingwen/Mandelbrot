@@ -3,18 +3,22 @@
 // Welcome to Mandelbrot, with big floats. This is a work in progress, so in the
 // meantime, here's a TODO list of things I still need to do.
 //
-// TODO: Documentation
-// And of course, TODO: Make video.
+// TODO: Documentation (woo literate programming!)
+// TODO: Try using Metal🤘 to speed up rendering
 //
 // COMPILATION
 //
-// You can compile this program with make, but you'll probably need to change
-// the Makefile to suit your system. Before doing so, install SDL2 and
-// SDL2_image. Then configure the Makefile to point to your system's include
-// files and library files (such as .so on Linux or .dylib on Mac).
+// This program was originally written for Clang+Make, then ported to XCode.
+// As such, I'll only provide general instructions for building this.
 //
-// The Makefile also uses clang; either install clang or change that to any
-// compiler that you use, such as gcc.
+// First of all, this program only supports ARM due to use of inline ARM asm.
+// If you would like x86 support, please contact me and I'll add it in; I just
+// don't want to waste my time if no one cares anyway.
+//
+// You only need to compile main.c, and remember to enable -Ofast optimisation.
+// You'll need to link SDL2 and SDL2_image, as well as tell the compiler where
+// to find their header files. Finally, remember that zoom.png needs to
+// accompany the binary.
 //
 // OUTLINE
 //
@@ -31,7 +35,7 @@
 // Right click - Zoom out
 // Tab - Change between preview and full resolution (may take a long time!)
 //
-// There's actually a movie mode as well TODO:
+// There's actually a movie mode as well TODO: Add
 //
 // BIG FLOAT
 //
@@ -420,17 +424,17 @@ struct fp256 int_to_fp256(int a)
     return b;
 }
 
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wconversion"
 #include "SDL2/SDL_video.h"
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_image.h>
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wconversion"
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
+#pragma clang diagnostic pop
 #include <stdio.h>
 #include <pthread.h>
 #include <math.h>
-#pragma clang diagnostic pop
 
 // RENDERING CONFIGURATION
 //
@@ -585,15 +589,16 @@ const struct color gradient_stops[GRADIENT_STOP_COUNT + 1] =
 #define ZOOM_IMAGE_SIZE_X 225
 #define ZOOM_IMAGE_SIZE_Y 150
 
-#define MOVIE 0
+#define MOVIE 1
 #define MOVIE_FULL_SHOW_X_INTERVAL 160
 // Coordinates from "Eye of the Universe"
 #define MOVIE_INITIAL_CENTER_X (struct fp256){ SIGN_POS, { 0, 0x5C38B7BB42D6E499, 0x134BFE5798655AA0, 0xCB8925EC9853B954 } }
 #define MOVIE_INITIAL_CENTER_Y (struct fp256){ SIGN_NEG, { 0, 0xA42D17BFC55EFB99, 0x9B8E8100EB7161E1, 0xCA1080A9F02EBC2A } }
-#define MOVIE_ZOOM_PER_FRAME   (struct fp256){ SIGN_POS, { 0, 0xFD0F413D0D9C5EF1, 0xDBE485CFBA44A80F, 0x30D9409A2D2212AF } } // 0.5 / 60
+#define MOVIE_ZOOM_PER_FRAME   (struct fp256){ SIGN_POS, { 0, 0xfa2727db62aebb76, 0x126ec75985ae7fe5, 0x1be434c7706da711 } }
+//#define MOVIE_ZOOM_PER_FRAME   (struct fp256){ SIGN_POS, { 0, 0xFD0F413D0D9C5EF1, 0xDBE485CFBA44A80F, 0x30D9409A2D2212AF } } // 0.5 / 60
 #define MOVIE_PREFIX "movie/frame"
 #define MOVIE_PREFIX_LEN 11
-#define MOVIE_INITIAL_FRAME 543
+#define MOVIE_INITIAL_FRAME 1724
 
 #define INITIAL_ITERATIONS 64
 
@@ -817,7 +822,7 @@ int main()
         for (int i = 0; i < MOVIE_INITIAL_FRAME - 1; i++)
         {
             size = fp_smul256(size, MOVIE_ZOOM_PER_FRAME);
-            iterations += 1; // TODO: Iterations setting
+            iterations += 2; // TODO: Iterations setting
             printf("Fast forward to frame %d...\n", i + 2);
         }
     }
@@ -1084,7 +1089,7 @@ int main()
 
                 haveToRender = true;
                 size = fp_smul256(size, MOVIE_ZOOM_PER_FRAME);
-                iterations += 1; // TODO: Iterations setting
+                iterations += 2; // TODO: Iterations setting
                 printf("Frame: %d\n", movie_current_frame);
                 memset(full_stored_pixels, 0, full_pixels_size);
                 memset(preview_stored_pixels, 0, preview_pixels_size);
