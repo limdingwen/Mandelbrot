@@ -1,7 +1,7 @@
 // INTRODUCTION
 //
 // Hi, welcome to the Metal version of the program. This version is currently
-// not documented as it's in alpha.
+// not documented because this is just a complete hack.
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -18,7 +18,7 @@
 #include <math.h>
 
 bool init_metal_compute(int pixels_size);
-bool metal_compute_pixels(int width,
+uint64_t *metal_compute_pixels(int width,
                           int height,
                           struct fp256 width_reciprocal,
                           struct fp256 height_reciprocal,
@@ -27,8 +27,7 @@ bool metal_compute_pixels(int width,
                           struct fp256 center_x,
                           struct fp256 center_y,
                           uint64_t iterations,
-                          uint8_t *pixels,
-                          int offset,
+                          uint64_t offset,
                           int interval);
 
 #define WINDOW_WIDTH 1920
@@ -111,7 +110,7 @@ const struct color gradient_stops[GRADIENT_STOP_COUNT + 1] =
 #define ZOOM_IMAGE_SIZE_X 225
 #define ZOOM_IMAGE_SIZE_Y 150
 
-#define MOVIE 0
+#define MOVIE 1
 #define MOVIE_FULL_SHOW_X_INTERVAL 160
 // Coordinates from "Eye of the Universe"
 #define MOVIE_INITIAL_CENTER_X (struct fp256){ SIGN_POS, { 0, 0x5C38B7BB, 0x42D6E499, 0x134BFE57, 0x98655AA0, 0xCB8925EC, 0x9853B954 } }
@@ -120,11 +119,40 @@ const struct color gradient_stops[GRADIENT_STOP_COUNT + 1] =
 //#define MOVIE_ZOOM_PER_FRAME   (struct fp256){ SIGN_POS, { 0, 0xFD0F413D0D9C5EF1, 0xDBE485CFBA44A80F, 0x30D9409A2D2212AF } } // 0.5 / 60
 #define MOVIE_PREFIX "movie/frame"
 #define MOVIE_PREFIX_LEN 11
-#define MOVIE_INITIAL_FRAME 1724
+#define MOVIE_INITIAL_FRAME 1976
 
 #define INITIAL_ITERATIONS 64
 
 #define METAL_INTERVAL 691200
+
+struct color color_lerp(struct color a, struct color b, float x)
+{
+    if (x > 1) x = 1;
+    if (x < 0) x = 0;
+    return (struct color)
+    {
+        a.r + (b.r - a.r)*x,
+        a.g + (b.g - a.g)*x,
+        a.b + (b.b - a.b)*x
+    };
+}
+
+struct gradient
+{
+    int stop_count;
+    int size;
+    const struct color *stops;
+};
+
+struct color gradient_color(struct gradient gradient, float x)
+{
+    x = fmodf(x, (float)gradient.size);
+    
+    int stop_prev = (int)((float)x / (float)gradient.size * (float)gradient.stop_count);
+    int stop_next = stop_prev + 1;
+    float stop_x = (float)x / (float)gradient.size * (float)gradient.stop_count - (float)stop_prev;
+    return color_lerp(gradient.stops[stop_prev], gradient.stops[stop_next], stop_x);
+}
 
 // TODO: Make shared
 struct fp256 calculateMathPos(int screen_pos, struct fp256 width_reciprocal, struct fp256 size, struct fp256 center)
@@ -140,7 +168,7 @@ int main()
     
     // Start Metal
     
-    init_metal_compute(WINDOW_WIDTH * WINDOW_HEIGHT * 4);
+    init_metal_compute(WINDOW_WIDTH * WINDOW_HEIGHT * sizeof(uint64_t));
 
     // Start SDL
 
@@ -242,7 +270,7 @@ int main()
         STATE_PREVIEW,
         STATE_FULL
     };
-    enum state state = MOVIE ? STATE_FULL : STATE_PREVIEW;
+    enum state state = (true || MOVIE) ? STATE_FULL : STATE_PREVIEW;
     bool haveToRender = true;
 
     bool running = true;
@@ -390,9 +418,33 @@ int main()
             
             struct fp256 size_x = fp_smul256(size, SIZE_RATIO_X);
             
-            for (int pixel = 0; pixel < width * height; pixel += METAL_INTERVAL)
+            for (uint64_t pixel = 0; pixel < width * height; pixel += METAL_INTERVAL)
             {
-                metal_compute_pixels(width, height, width_reciprocal, height_reciprocal, size, size_x, center_x, center_y, iterations, stored_pixels, pixel, METAL_INTERVAL);
+                uint64_t *results = metal_compute_pixels(width, height, width_reciprocal, height_reciprocal, size, size_x, center_x, center_y, iterations, pixel, METAL_INTERVAL);
+                for (uint64_t i = pixel; i < pixel + METAL_INTERVAL; i++)
+                {
+                    if (results[i] == -1ULL)
+                    {
+                        stored_pixels[i * 4 + 0] = 0;
+                        stored_pixels[i * 4 + 1] = 0;
+                        stored_pixels[i * 4 + 2] = 0;
+                        stored_pixels[i * 4 + 3] = 255;
+                    }
+                    else
+                    {
+                        static struct gradient gradient =
+                        {
+                            GRADIENT_STOP_COUNT,
+                            GRADIENT_ITERATION_SIZE,
+                            gradient_stops
+                        };
+                        struct color color = gradient_color(gradient, sqrtf(results[i]));
+                        stored_pixels[i * 4 + 0] = color.r;
+                        stored_pixels[i * 4 + 1] = color.g;
+                        stored_pixels[i * 4 + 2] = color.b;
+                        stored_pixels[i * 4 + 3] = 255;
+                    }
+                }
 
                 if (state == STATE_PREVIEW || SHOW_PREVIEW_WHEN_RENDERING)
                 {
