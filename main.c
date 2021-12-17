@@ -1,429 +1,9 @@
 // INTRODUCTION
 //
-// Welcome to Mandelbrot, with big floats. This is a work in progress, so in the
-// meantime, here's a TODO list of things I still need to do.
-//
-// TODO: Documentation (woo literate programming!)
-// TODO: Try using Metal🤘 to speed up rendering
-//
-// COMPILATION
-//
-// This program was originally written for Clang+Make, then ported to XCode.
-// As such, I'll only provide general instructions for building this.
-//
-// First of all, this program only supports ARM due to use of inline ARM asm.
-// If you would like x86 support, please contact me and I'll add it in; I just
-// don't want to waste my time if no one cares anyway.
-//
-// You only need to compile main.c, and remember to enable -Ofast optimisation.
-// You'll need to link SDL2 and SDL2_image, as well as tell the compiler where
-// to find their header files. Finally, remember that zoom.png needs to
-// accompany the binary.
-//
-// OUTLINE
-//
-// This version of the program has two modes; preview and full-sized rendering.
-// Both modes are nearly identical except for the resolution in which they are
-// rendered at. In an earlier version of this program, the preview mode was able
-// to run at 60fps, navigatable by keyboard. However, ever since the switch from
-// doubles to big floats, the program does not run fast enough to enjoy that
-// level of interactivity. As such, both modes operate on click-to-zoom.
-//
-// Controls:
-// H - Return home
-// Left click - Zoom in
-// Right click - Zoom out
-// Tab - Change between preview and full resolution (may take a long time!)
-//
-// There's actually a movie mode as well TODO: Add
-//
-// BIG FLOAT
-//
-// One of the core parts of Mandelbrot is the floating point precision, so it
-// makes sense to go over them first.
-//
-// We do not use any floating points in our program; instead, we have an array
-// of uint64s, and then we simply imagine the decimal point to be in-between
-// the first uint64 and the second. That way our calculations are immensely
-// simplified. Adding and subtracting can ignore the decimal point entirely,
-// while multiplication just involves taking a slice of the resulting bits.
-//
-// While we can technically achieve abitrary precision, it was easier to limit
-// ourselves to 256-bits and 512-bits for now. You may also notice that we are
-// wasting quite a lot of bits by having 64 bits be part of the "whole number".
-// However, doing so makes the program a lot simpler and seems to be good enough
-// for now.
-//
-// Finally, we use a sign-magnitude representation instead of 2s complement.
-// While this makes adding and subtracting much harder, it makes multiplication
-// much easier. I'm unsure if this was a good tradeoff, but it seems like most
-// bignum libraries use sign-magnitude as well.
+// Hi, welcome to the Metal version of the program. This version is currently
+// not documented as it's in alpha.
 
-#include <stdint.h>
-
-enum sign
-{
-    SIGN_NEG,
-    SIGN_ZERO,
-    SIGN_POS
-};
-
-struct fp256
-{
-    enum sign sign;
-    uint64_t man[4];
-};
-
-struct fp512
-{
-    enum sign sign;
-    uint64_t man[8];
-};
-
-// Let's start with unsigned addition. This is the exciting bit; we get to use
-// some easy inline assembly! As you can see, we simply add the LSB (Least
-// Significant Bit) of a and b, saving the carry, and then repeat all the way
-// to the MSB (Most Significant Bit) while propogating the carry.
-//
-// We do use quite a lot of registers here, which is another reason for fixing
-// ourselves at 512-bits max. ARM only has about 30 usage registers, so we're
-// quite near the limit. Any more, and we'll have to start writing code to spill
-// registers mid-way through the calculation.
-
-struct fp512 fp_uadd512(struct fp512 a, struct fp512 b)
-{
-    struct fp512 c;
-    asm("ADDS %7, %15, %23\n"
-        "ADCS %6, %14, %22\n"
-        "ADCS %5, %13, %21\n"
-        "ADCS %4, %12, %20\n"
-        "ADCS %3, %11, %19\n"
-        "ADCS %2, %10, %18\n"
-        "ADCS %1, %9, %17\n"
-        "ADC  %0, %8, %16"
-        :
-        "=&r"(c.man[0]), // 0
-        "=&r"(c.man[1]), // 1
-        "=&r"(c.man[2]), // 2
-        "=&r"(c.man[3]), // 3
-        "=&r"(c.man[4]), // 4
-        "=&r"(c.man[5]), // 5
-        "=&r"(c.man[6]), // 6
-        "=&r"(c.man[7])  // 7
-        :
-        "r"  (a.man[0]), // 8
-        "r"  (a.man[1]), // 9
-        "r"  (a.man[2]), // 10
-        "r"  (a.man[3]), // 11
-        "r"  (a.man[4]), // 12
-        "r"  (a.man[5]), // 13
-        "r"  (a.man[6]), // 14
-        "r"  (a.man[7]), // 15
-        "r"  (b.man[0]), // 16
-        "r"  (b.man[1]), // 17
-        "r"  (b.man[2]), // 18
-        "r"  (b.man[3]), // 19
-        "r"  (b.man[4]), // 20
-        "r"  (b.man[5]), // 21
-        "r"  (b.man[6]), // 22
-        "r"  (b.man[7])  // 23
-        :
-        "cc");
-    return c;
-}
-
-// We do the same thing for 256-bits, but we will use a macro to help us reuse
-// the same code for both adding (ADD/ADC) and subtracting (SUB/SBC).
-//
-// Do note that since we are using signed-magnitude comparison, we must ensure
-// that a > b before subtracting, so as to ensure that the resulting magnitude
-// does not wrap around in 2s complement representation. The only exception is
-// if we're comparing a and b, in which we will throw away the results after
-// (and not use it as a magnitude).
-
-#define DEF_FP_UADDSUB256(name, op, opc) struct fp256 fp_u##name##256(struct fp256 a, struct fp256 b) \
-{ \
-    struct fp256 c; \
-    asm(#op  "S %3, %7, %11\n" \
-        #opc "S %2, %6, %10\n" \
-        #opc "S %1, %5, %9\n" \
-        #opc "  %0, %4, %8" \
-        : \
-        "=&r"(c.man[0]), /* 0 */ \
-        "=&r"(c.man[1]), /* 1 */ \
-        "=&r"(c.man[2]), /* 2 */ \
-        "=&r"(c.man[3])  /* 3 */ \
-        : \
-        "r"  (a.man[0]), /* 4 */ \
-        "r"  (a.man[1]), /* 5 */ \
-        "r"  (a.man[2]), /* 6 */ \
-        "r"  (a.man[3]), /* 7 */ \
-        "r"  (b.man[0]), /* 8 */ \
-        "r"  (b.man[1]), /* 9 */ \
-        "r"  (b.man[2]), /* 10 */ \
-        "r"  (b.man[3])  /* 11 */ \
-        : \
-        "cc"); \
-    return c; \
-}
-DEF_FP_UADDSUB256(add, ADD, ADC);
-DEF_FP_UADDSUB256(sub, SUB, SBC);
-#undef DEF_FP_UADDSUB256
-
-// This allows us to compare the magnitudes of two numbers (note that this
-// function is unsigned and ignores the signs of the numbers)! We can do so
-// by simply performing (a - b). Then, if it's negative, b must be more than a.
-// If it's non-negative, it can either be 0 (same) or a is more than b.
-
-enum cmp
-{
-    CMP_SAME,
-    CMP_A_BIG,
-    CMP_B_BIG
-};
-
-#include <string.h>
-#include <stdbool.h>
-
-enum cmp fp_ucmp256(struct fp256 a, struct fp256 b)
-{
-    static const uint64_t zero[4]; // Static variables are 0 by default
-    struct fp256 c = fp_usub256(a, b);
-    bool is_negative = (c.man[0] >> 63) == 1;
-    if (is_negative)
-        return CMP_B_BIG;
-    else
-        if (memcmp(c.man, zero, 4 * sizeof(uint64_t)) == 0)
-            return CMP_SAME;
-        else
-            return CMP_A_BIG;
-}
-
-// With unsigned add, sub and cmp functions, we can use this to build a signed
-// addition function. First, we check for the special case in which one or both
-// of the inputs are 0:
-
-#include <assert.h>
-
-struct fp256 fp_sadd256(struct fp256 a, struct fp256 b)
-{
-    if (a.sign == SIGN_ZERO && b.sign == SIGN_ZERO)
-        return a;
-    if (b.sign == SIGN_ZERO)
-        return a;
-    if (a.sign == SIGN_ZERO)
-        return b;
-
-// First, if both are of the same sign, we can simply add the magnitudes and
-// inherit the sign.
-
-    if ((a.sign == SIGN_POS && b.sign == SIGN_POS) ||
-        (a.sign == SIGN_NEG && b.sign == SIGN_NEG))
-    {
-        struct fp256 c = fp_uadd256(a, b);
-        c.sign = a.sign;
-        return c;
-    }
-
-// At this point, there are only 2 possibilities: -a and +b, or +a and -b.
-
-    assert((a.sign == SIGN_POS && b.sign == SIGN_NEG) ||
-           (a.sign == SIGN_NEG && b.sign == SIGN_POS));
-
-// It should be obvious that if we have a - b or b - a, if a = b, then the
-// answer is 0.
-
-    enum cmp cmp = fp_ucmp256(a, b);
-    if (cmp == CMP_SAME)
-        return (struct fp256) { SIGN_ZERO, {0} };
-
-// And then we can simply follow this chart for the remaining possibilities:
-// https://www.tutorialspoint.com/explain-the-performance-of-addition-and-subtraction-with-signed-magnitude-data-in-computer-architecture
-
-    if (a.sign == SIGN_POS && b.sign == SIGN_NEG)
-    {
-        if (cmp == CMP_A_BIG)
-        {
-            struct fp256 c = fp_usub256(a, b);
-            c.sign = SIGN_POS;
-            return c;
-        }
-        else
-        {
-            struct fp256 c = fp_usub256(b, a);
-            c.sign = SIGN_NEG;
-            return c;
-        }
-    }
-    else
-    {
-        if (cmp == CMP_A_BIG)
-        {
-            struct fp256 c = fp_usub256(a, b);
-            c.sign = SIGN_NEG;
-            return c;
-        }
-        else
-        {
-            struct fp256 c = fp_usub256(b, a);
-            c.sign = SIGN_POS;
-            return c;
-        }
-    }
-}
-
-// We can build upon signed addition to created signed subtraction, by simply
-// inverting the second operand's sign.
-
-struct fp256 fp_sinv256(struct fp256 a)
-{
-    if (a.sign == SIGN_POS) a.sign = SIGN_NEG;
-    else if (a.sign == SIGN_NEG) a.sign = SIGN_POS;
-    return a;
-}
-
-struct fp256 fp_ssub256(struct fp256 a, struct fp256 b)
-{
-    return fp_sadd256(a, fp_sinv256(b));
-}
-
-// Now for the big gun; multiplication. There exists harder and more efficient
-// multiplication algorithms, but I'll go with the naive, elementary-school-like
-// way of doing it.
-
-struct fp256 fp_smul256(struct fp256 a, struct fp256 b)
-{
-
-// First, the obvious x * 0 = 0.
-
-    if (a.sign == SIGN_ZERO || b.sign == SIGN_ZERO)
-        return (struct fp256) { SIGN_ZERO, {0} };
-
-// Next, we calculate the magnitude of a * the magnitude of b to create our
-// final magnitude (c). We create a 512-bit number to hold all the possible
-// bits of a 256 * 256 bit multiplication.
-
-    struct fp512 c = {0};
-
-// Just like in elementary school, we literally just multiply each word (digit)
-// with all the words in the other operand.
-
-    for (int i = 3; i >= 0; i--) // a
-    {
-        for (int j = 3; j >= 0; j--) // b
-        {
-
-// First, we use a 128-bit number to multiply our two 64-bit words (digit). We
-// do this because ARM's 128-bit multiplication was so hard to understand. Plus,
-// it's portable!
-//
-// Also yes, we could have done this for adding as well, but 1) inline assembly
-// is kinda fun and 2) I'm unsure if the compiler would have generated the
-// optimal ADDS/ADCS code.
-
-#ifndef __SIZEOF_INT128__
-#error Your compiler or platform does not support 128 bits.
-#endif
-
-            __uint128_t mult = (__uint128_t)a.man[i] * (__uint128_t)b.man[j];
-
-// We then put this 128-bit number into 2 64-bit words (digits), and that makes
-// up 1 "row", like you normally see in pencil-and-paper multiplication. Then
-// we can simply repeatedly accumulate this into the final answer.
-
-            int low_offset = 7 - (3 - i) - (3 - j);
-            assert(low_offset >= 1);
-            int high_offset = low_offset - 1;
-
-            struct fp512 temp = {0};
-            temp.man[low_offset] = (uint64_t)mult;
-            temp.man[high_offset] = mult >> 64;
-
-            c = fp_uadd512(c, temp);
-        }
-    }
-
-// With the magnitude calculated, finding the sign of the result is trivial:
-
-    enum sign sign;
-    if (a.sign == SIGN_NEG && b.sign == SIGN_NEG)
-        sign = SIGN_POS;
-    else if (a.sign == SIGN_NEG || b.sign == SIGN_NEG)
-        sign = SIGN_NEG;
-    else
-        sign = SIGN_POS;
-
-// Finally, we need to convert the 512-bit result back into 256-bits. Take note
-// that 1.234 * 5.678 = 12.345678 (the numbers represent the word position),
-// and so we need to take the slice [2, 5].
-
-    struct fp256 c256;
-    c256.sign = sign;
-    memcpy(c256.man, c.man + 1, 4 * sizeof(uint64_t));
-
-    return c256;
-}
-
-struct fp256 fp_ssqr256(struct fp256 a)
-{
-    return fp_smul256(a, a);
-}
-
-// There's an easier way to multiply or divide by 2 however; bit shifting!
-// For shifting to the right (ASR), we first shift the least significant word
-// to the right, then take the least signifiant bit of the second word, and then
-// put it at the most significant bit of the least significant word.
-//
-// In effect, it's as if we take the entire 256 bits and shift it once to the
-// right, where the original least significant bit gets ignored, while the
-// new most significant bit is 0.
-
-struct fp256 fp_asr256(struct fp256 a)
-{
-    a.man[3] >>= 1;
-    a.man[3] |= (a.man[2] & 0x1) << 63;
-    a.man[2] >>= 1;
-    a.man[2] |= (a.man[1] & 0x1) << 63;
-    a.man[1] >>= 1;
-    a.man[1] |= (a.man[0] & 0x1) << 63;
-    a.man[0] >>= 1;
-    return a;
-}
-
-struct fp256 fp_asl256(struct fp256 a)
-{
-    a.man[0] <<= 1;
-    a.man[0] |= (a.man[1] & 0x8000000000000000) >> 63;
-    a.man[1] <<= 1;
-    a.man[1] |= (a.man[2] & 0x8000000000000000) >> 63;
-    a.man[2] <<= 1;
-    a.man[2] |= (a.man[3] & 0x8000000000000000) >> 63;
-    a.man[3] <<= 1;
-    return a;
-}
-
-// Finally, to convert a signed into a number, first we remove the sign (and
-// store it as the sign enum), then we put the magnitude into the first word
-// of the mantissa (which is defined to be the whole number).
-
-struct fp256 int_to_fp256(int a)
-{
-    if (a == 0)
-        return (struct fp256){ SIGN_ZERO, {0} };
-    
-    struct fp256 b = {0};
-    if (a < 0)
-    {
-        b.sign = SIGN_NEG;
-        a = -a;
-    }
-    else
-        b.sign = SIGN_POS;
-    
-    b.man[0] = (uint64_t)a;
-    return b;
-}
-
+#include "BigFloat.h"
 #include "SDL2/SDL_video.h"
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_image.h>
@@ -436,31 +16,11 @@ struct fp256 int_to_fp256(int a)
 #include <pthread.h>
 #include <math.h>
 
-// RENDERING CONFIGURATION
-//
-// First, let's define some properties for full-sized rendering. We assume that
-// full-size is 1:1 to the window, and thus window size = full-size dimensions.
-
 #define WINDOW_WIDTH 1920
 #define WINDOW_HEIGHT 1080
-
-// Here, we also define reciprocals (1/x) of the width and height, as our big
-// float implementation is currently unable to divide; only multiply. We will
-// elaborate on the big float implementation later. Currently, this represents
-// the raw hexadecimal value of the big float as converting from a decimal
-// value is too difficult.
-
-#define WINDOW_WIDTH_RECIPROCAL  (struct fp256){ SIGN_POS,  { 0, 0x0022222222222222, 0x2222222222222222, 0x2222222222222222 } }
-#define WINDOW_HEIGHT_RECIPROCAL (struct fp256){ SIGN_POS,  { 0, 0x003CAE759203CAE7, 0x59203CAE759203CA, 0xE759203CAE759203 } }
-
-// This defines how many columns of pixels we draw before presenting a frame
-// to the user. Doing this after too little columns results in slower rendering.
-// This should be a factor of FULL_THREAD_X_SIZE below.
-
+#define WINDOW_WIDTH_RECIPROCAL  (struct fp256){ SIGN_POS,  { 0, 0x00222222, 0x22222222, 0x22222222, 0x22222222, 0x22222222, 0x22222222 } }
+#define WINDOW_HEIGHT_RECIPROCAL (struct fp256){ SIGN_POS,  { 0, 0x003CAE75, 0x9203CAE7, 0x59203CAE, 0x759203CA, 0xE759203C, 0xAE759203 } }
 #define FULL_SHOW_X_INTERVAL 10
-
-// We are going to render multicore, and the simplest way to do so is to divide
-// up fixed blocks of pixels for each core to render.
 
 #define THREADS 8
 
@@ -484,31 +44,13 @@ const struct thread_block full_thread_blocks[THREADS] =
     { 1440, 1919, 540, 1079 },
 };
 
-// Since this is multicore, the program must be able to know how many columns
-// it should render for each block; it can't just loop through the entire
-// window.
-//
-// This must be the difference between x_start and x_end in full_thread_blocks.
-// And yes, all of them must have the same width.
-
 #define FULL_THREAD_X_SIZE 480
 
-// When switching from preview to full-mode rendering, the user might want to
-// see a black screen so the progress of the render might be easier to see,
-// or they might want to see the preview behind the partly-done full-mode render
-// so the image progressively looks clearer.
-
 #define SHOW_PREVIEW_WHEN_RENDERING 1
-
-// Next, we define the same rendering settings, but for the preview mode. The
-// preview mode differs in that it is much smaller and faster to render, but
-// is almost identical in every other way.
-
-// TODO: Need new resolution
 #define PREVIEW_WIDTH 240
 #define PREVIEW_HEIGHT 160
-#define PREVIEW_WIDTH_RECIPROCAL (struct fp256){ SIGN_POS,  { 0, 0x0111111111111111, 0x1111111111111111, 0x1111111111111111 } }
-#define PREVIEW_HEIGHT_RECIPROCAL (struct fp256){ SIGN_POS, { 0, 0x0199999999999999, 0x9999999999999999, 0x9999999999999999 } }
+#define PREVIEW_WIDTH_RECIPROCAL (struct fp256){ SIGN_POS,  { 0, 0x01111111, 0x11111111, 0x11111111, 0x11111111, 0x11111111, 0x11111111 } }
+#define PREVIEW_HEIGHT_RECIPROCAL (struct fp256){ SIGN_POS, { 0, 0x01999999, 0x99999999, 0x99999999, 0x99999999, 0x99999999, 0x99999999 } }
 #define PREVIEW_SHOW_X_INTERVAL 5
 #define PREVIEW_THREAD_X_SIZE 60
 
@@ -524,20 +66,7 @@ const struct thread_block preview_thread_blocks[THREADS] =
     { 180, 239, 80, 159 },
 };
 
-// GRADIENT CONFIGURATION
-//
-// Next, we'll define the color gradient for all the diverging values of the
-// mandelbrot set. The gradient is set to loop for every GRADIENT_ITERATION_SIZE
-// number of iterations. Since the program will use modulus to loop the
-// gradient, using a power-of-two number hopefully triggers the compiler
-// optimiser to use a mask instead. This is important since gradient is
-// calculated for every pixel on the screen.
-
 #define GRADIENT_ITERATION_SIZE 16 // Use 2^x for best performance
-
-// Next, we define the actual gradient, in 0-255 RGB format. We also duplicate
-// the first and last stops, so that it will be easier for the program to loop
-// it later on, as you will see.
 
 struct color
 {
@@ -556,58 +85,29 @@ const struct color gradient_stops[GRADIENT_STOP_COUNT + 1] =
     { 0x44, 0x44, 0xFF }, // For looping
 };
 
-// OTHER CONFIGURATION
-//
-// First, the initial center and size of the view. Size represents the length
-// of the visible Y axis, while the X axis may be derived by multiplying by
-// SIZE_RATIO_X. This ratio may be derived using WINDOW_WIDTH / WINDOW_HEIGHT.
-
-#define INITIAL_CENTER_X (struct fp256){ SIGN_NEG, { 0, 0x8000000000000000, 0, 0 } } // -0.5
+#define INITIAL_CENTER_X (struct fp256){ SIGN_NEG, { 0, 0x80000000 } } // -0.5
 #define INITIAL_CENTER_Y (struct fp256){ SIGN_ZERO, {0} } // 0
 #define INITIAL_SIZE (struct fp256){ SIGN_POS, { 2, 0, 0, 0 }} // 2
-#define SIZE_RATIO_X (struct fp256){ SIGN_POS, { 1, 0xC71C71C71C71C71C, 0x71C71C71C71C71C7, 0x1C71C71C71C71C71 } } // 1920/1080
-
-// The program uses a click-to-zoom mechanic, and thus we need to show the user
-// an image so the user knows where they will be zooming into. As with all
-// resources, the image may be found in the same folder as the executable.
+#define SIZE_RATIO_X (struct fp256){ SIGN_POS, { 1, 0xC71C71C7, 0x1C71C71C, 0x71C71C71, 0xC71C71C7, 0x1C71C71C, 0x71C71C71 } } // 1920/1080
 
 #define ZOOM_IMAGE_PATH "zoom.png"
-
-// Here, we may configure how much zoom we want to apply per click; it shall be
-// calculated as size *= ZOOM when zooming in, and size /= ZOOM when zooming
-// out. For instance, a zoom of 0.25 will zoom the user in by 4x every click.
-// The zoom should divide WINDOW_WIDTH and WINDOW_HEIGHT, as we shall soon see.
-
-#define ZOOM (struct fp256){ SIGN_POS, { 0, 0x4000000000000000, 0, 0 } } // 0.25
+#define ZOOM (struct fp256){ SIGN_POS, { 0, 0x40000000 } } // 0.25
 #define ZOOM_RECIPROCAL (struct fp256){ SIGN_POS, { 4, 0, 0, 0 } }
-
-// Here, we define not the size of the image as seen on disk, but rather how big
-// the image should be when rendered on screen. It should be obvious now why
-// ZOOM should divide the width and height; it is so that we may have nice
-// values for the zoom image, such as WINDOW_WIDTH / 4 and WINDOW_HEIGHT / 4.
-
 #define ZOOM_IMAGE_SIZE_X 225
 #define ZOOM_IMAGE_SIZE_Y 150
 
-#define MOVIE 1
+#define MOVIE 0
 #define MOVIE_FULL_SHOW_X_INTERVAL 160
 // Coordinates from "Eye of the Universe"
-#define MOVIE_INITIAL_CENTER_X (struct fp256){ SIGN_POS, { 0, 0x5C38B7BB42D6E499, 0x134BFE5798655AA0, 0xCB8925EC9853B954 } }
-#define MOVIE_INITIAL_CENTER_Y (struct fp256){ SIGN_NEG, { 0, 0xA42D17BFC55EFB99, 0x9B8E8100EB7161E1, 0xCA1080A9F02EBC2A } }
-#define MOVIE_ZOOM_PER_FRAME   (struct fp256){ SIGN_POS, { 0, 0xfa2727db62aebb76, 0x126ec75985ae7fe5, 0x1be434c7706da711 } }
+#define MOVIE_INITIAL_CENTER_X (struct fp256){ SIGN_POS, { 0, 0x5C38B7BB, 0x42D6E499, 0x134BFE57, 0x98655AA0, 0xCB8925EC, 0x9853B954 } }
+#define MOVIE_INITIAL_CENTER_Y (struct fp256){ SIGN_NEG, { 0, 0xA42D17BF, 0xC55EFB99, 0x9B8E8100, 0xEB7161E1, 0xCA1080A9, 0xF02EBC2A } }
+#define MOVIE_ZOOM_PER_FRAME   (struct fp256){ SIGN_POS, { 0, 0xfa2727db, 0x62aebb76, 0x126ec759, 0x85ae7fe5, 0x1be434c7, 0x706da711 } }
 //#define MOVIE_ZOOM_PER_FRAME   (struct fp256){ SIGN_POS, { 0, 0xFD0F413D0D9C5EF1, 0xDBE485CFBA44A80F, 0x30D9409A2D2212AF } } // 0.5 / 60
 #define MOVIE_PREFIX "movie/frame"
 #define MOVIE_PREFIX_LEN 11
 #define MOVIE_INITIAL_FRAME 1724
 
 #define INITIAL_ITERATIONS 64
-
-// GRADIENT IMPLEMENTATION
-//
-// We have already defined the structure of color in GRADIENT CONFIGURATION,
-// as it was needed at the time. Here, we shall define a trivial function for
-// lerping between two colors, for the gradient to use. We also clamp x so that
-// colors may not end up as more than 255 or less than 0.
 
 struct color color_lerp(struct color a, struct color b, float x)
 {
@@ -621,10 +121,6 @@ struct color color_lerp(struct color a, struct color b, float x)
     };
 }
 
-// We use a gradient struct instead of the configuration seen above so we do not
-// tie our implementation to this source file. Rather, any caller may pass in
-// any gradient configuration to our function.
-
 struct gradient
 {
     int stop_count;
@@ -632,23 +128,15 @@ struct gradient
     const struct color *stops;
 };
 
-// For a particular point on a looping gradient, return a color.
-
 struct color gradient_color(struct gradient gradient, float x)
 {
-
-// As said before, first we perform a modulus on x so to make the gradient loop.
-
     x = fmodf(x, (float)gradient.size);
-
-// 
-
+    
     int stop_prev = (int)((float)x / (float)gradient.size * (float)gradient.stop_count);
     int stop_next = stop_prev + 1;
     float stop_x = (float)x / (float)gradient.size * (float)gradient.stop_count - (float)stop_prev;
     return color_lerp(gradient.stops[stop_prev], gradient.stops[stop_next], stop_x);
 }
-
 
 // Thread
 
@@ -740,7 +228,7 @@ void *thread(void *arg)
 }
 
 int main()
-{
+{ 
     int err;
     int exit_code = EXIT_SUCCESS;
 
@@ -844,7 +332,7 @@ int main()
         STATE_PREVIEW,
         STATE_FULL
     };
-    enum state state = STATE_FULL;
+    enum state state = MOVIE ? STATE_FULL : STATE_PREVIEW;
     bool haveToRender = true;
 
     bool running = true;

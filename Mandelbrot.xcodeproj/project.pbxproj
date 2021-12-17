@@ -76,6 +76,7 @@
 		D95BA145276BAC87003DEA0D /* libpng16.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libpng16.a; path = ../../../../../../opt/homebrew/Cellar/libpng/1.6.37/lib/libpng16.a; sourceTree = "<group>"; };
 		D95BA148276BACEF003DEA0D /* libiconv.tbd */ = {isa = PBXFileReference; lastKnownFileType = "sourcecode.text-based-dylib-definition"; name = libiconv.tbd; path = usr/lib/libiconv.tbd; sourceTree = SDKROOT; };
 		D95BA14B276BB51F003DEA0D /* .gitignore */ = {isa = PBXFileReference; lastKnownFileType = text; path = .gitignore; sourceTree = "<group>"; };
+		D95BA150276C301C003DEA0D /* BigFloat.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = BigFloat.h; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -110,6 +111,7 @@
 		D95BA0CE276B9F56003DEA0D = {
 			isa = PBXGroup;
 			children = (
+				D95BA150276C301C003DEA0D /* BigFloat.h */,
 				D95BA14B276BB51F003DEA0D /* .gitignore */,
 				D95BA0E1276B9FA7003DEA0D /* main.c */,
 				D95BA0E3276B9FAC003DEA0D /* stb_image_write.h */,
@@ -375,6 +377,7 @@
 					/opt/homebrew/Cellar/jpeg/9d/lib,
 					/opt/homebrew/Cellar/libpng/1.6.37/lib,
 				);
+				ONLY_ACTIVE_ARCH = YES;
 				OTHER_LDFLAGS = "";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 			};
