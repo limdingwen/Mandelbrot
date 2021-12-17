@@ -3,6 +3,8 @@
 // Hi, welcome to the Metal version of the program. This version is currently
 // not documented as it's in alpha.
 
+#include <stdint.h>
+#include <stdbool.h>
 #include "BigFloat.h"
 #include "SDL2/SDL_video.h"
 #include <SDL2/SDL.h>
@@ -13,8 +15,21 @@
 #include "stb_image_write.h"
 #pragma clang diagnostic pop
 #include <stdio.h>
-#include <pthread.h>
 #include <math.h>
+
+bool init_metal_compute(int pixels_size);
+bool metal_compute_pixels(int width,
+                          int height,
+                          struct fp256 width_reciprocal,
+                          struct fp256 height_reciprocal,
+                          struct fp256 size,
+                          struct fp256 size_x,
+                          struct fp256 center_x,
+                          struct fp256 center_y,
+                          uint64_t iterations,
+                          uint8_t *pixels,
+                          int offset,
+                          int interval);
 
 #define WINDOW_WIDTH 1920
 #define WINDOW_HEIGHT 1080
@@ -109,128 +124,23 @@ const struct color gradient_stops[GRADIENT_STOP_COUNT + 1] =
 
 #define INITIAL_ITERATIONS 64
 
-struct color color_lerp(struct color a, struct color b, float x)
-{
-    if (x > 1) x = 1;
-    if (x < 0) x = 0;
-    return (struct color)
-    {
-        a.r + (b.r - a.r)*x,
-        a.g + (b.g - a.g)*x,
-        a.b + (b.b - a.b)*x
-    };
-}
+#define METAL_INTERVAL 691200
 
-struct gradient
-{
-    int stop_count;
-    int size;
-    const struct color *stops;
-};
-
-struct color gradient_color(struct gradient gradient, float x)
-{
-    x = fmodf(x, (float)gradient.size);
-    
-    int stop_prev = (int)((float)x / (float)gradient.size * (float)gradient.stop_count);
-    int stop_next = stop_prev + 1;
-    float stop_x = (float)x / (float)gradient.size * (float)gradient.stop_count - (float)stop_prev;
-    return color_lerp(gradient.stops[stop_prev], gradient.stops[stop_next], stop_x);
-}
-
-// Thread
-
+// TODO: Make shared
 struct fp256 calculateMathPos(int screen_pos, struct fp256 width_reciprocal, struct fp256 size, struct fp256 center)
 {
     struct fp256 offset = fp_ssub256(center, fp_asr256(size));
     return fp_sadd256(fp_smul256(fp_smul256(int_to_fp256(screen_pos), width_reciprocal), size), offset);
 }
 
-struct mb_result
-{
-    bool is_in_set;
-    unsigned long long escape_iterations;
-};
-
-struct mb_result process_mandelbrot(struct fp256 math_x, struct fp256 math_y, unsigned long long iterations)
-{
-    struct fp256 x2 = { SIGN_ZERO, {0} };
-    struct fp256 y2 = { SIGN_ZERO, {0} };
-    struct fp256 x = { SIGN_ZERO, {0} };
-    struct fp256 y = { SIGN_ZERO, {0} };
-
-    for (unsigned long long i = 0; i < iterations; i++)
-    {
-        y = fp_sadd256(fp_asl256(fp_smul256(x, y)), math_y);
-        x = fp_sadd256(fp_ssub256(x2, y2), math_x);
-        x2 = fp_ssqr256(x);
-        y2 = fp_ssqr256(y);
-        if (fp_sadd256(x2, y2).man[0] >= 4)
-            return (struct mb_result){ false, i };
-    }
-    return (struct mb_result){ true, -1ULL };
-}
-
-struct thread_data
-{
-    int x_start;
-    int x_end;
-    int y_start;
-    int y_end;
-    int width;
-    int height;
-    struct fp256 width_reciprocal;
-    struct fp256 height_reciprocal;
-    struct fp256 size;
-    struct fp256 center_x;
-    struct fp256 center_y;
-    unsigned long long iterations;
-    uint8_t *pixels;
-};
-
-void *thread(void *arg)
-{
-    struct thread_data *data = (struct thread_data*)arg;
-    struct fp256 size_x = fp_smul256(data->size, SIZE_RATIO_X);
-
-    for (int screen_x = data->x_start; screen_x <= data->x_end; screen_x++)
-    {
-        struct fp256 math_x = calculateMathPos(screen_x, data->width_reciprocal, size_x, data->center_x);
-
-        for (int screen_y = data->y_start; screen_y <= data->y_end; screen_y++)
-        {
-            struct fp256 math_y = calculateMathPos(data->height - screen_y, data->height_reciprocal, data->size, data->center_y);
-            struct mb_result result = process_mandelbrot(math_x, math_y, data->iterations);
-
-            struct color color;
-            if (result.is_in_set)
-                color = (struct color){ 0, 0, 0 };
-            else
-            {
-                const static struct gradient gradient =
-                {
-                    GRADIENT_STOP_COUNT,
-                    GRADIENT_ITERATION_SIZE,
-                    gradient_stops
-                };
-                color = gradient_color(gradient, (float)sqrt((double)result.escape_iterations));
-            }
-            
-            int r_offset = (screen_y*data->width + screen_x)*4;
-            data->pixels[r_offset + 0] = (uint8_t) color.r;
-            data->pixels[r_offset + 1] = (uint8_t) color.g;
-            data->pixels[r_offset + 2] = (uint8_t) color.b;
-            data->pixels[r_offset + 3] = 255;
-        }
-    }
-
-    pthread_exit(NULL);
-}
-
 int main()
-{ 
+{
     int err;
     int exit_code = EXIT_SUCCESS;
+    
+    // Start Metal
+    
+    init_metal_compute(WINDOW_WIDTH * WINDOW_HEIGHT * 4);
 
     // Start SDL
 
@@ -478,48 +388,11 @@ int main()
                 show_x_interval = MOVIE_FULL_SHOW_X_INTERVAL;
             }
             
-            for (int x = 0; x < thread_x_size; x += show_x_interval)
+            struct fp256 size_x = fp_smul256(size, SIZE_RATIO_X);
+            
+            for (int pixel = 0; pixel < width * height; pixel += METAL_INTERVAL)
             {
-                pthread_t thread_ids[THREADS];
-                struct thread_data thread_datas[THREADS];
-                for (int i = 0; i < THREADS; i++)
-                {
-                    // Quick hack for "bottom blocks reverse X" effect
-                    int visual_x = (i < 4) ? x : (thread_x_size - x - show_x_interval);
-                    thread_datas[i] = (struct thread_data){
-                        thread_blocks[i].x_start + visual_x,
-                        thread_blocks[i].x_start + visual_x + show_x_interval - 1,
-                        thread_blocks[i].y_start,
-                        thread_blocks[i].y_end,
-                        width,
-                        height,
-                        width_reciprocal,
-                        height_reciprocal,
-                        size,
-                        center_x,
-                        center_y,
-                        iterations,
-                        stored_pixels
-                    };
-                    err = pthread_create(&thread_ids[i], NULL, thread, &thread_datas[i]);
-                    if (err != 0)
-                    {
-                        fprintf(stderr, "Unable to create thread: Error code %d\n", err);
-                        exit_code = EXIT_FAILURE;
-                        goto cleanup;
-                    }
-                }
-
-                for (int i = 0; i < THREADS; i++)
-                {
-                    err = pthread_join(thread_ids[i], NULL);
-                    if (err != 0)
-                    {
-                        fprintf(stderr, "Unable to join thread: Error code %d\n", err);
-                        exit_code = EXIT_FAILURE;
-                        goto cleanup;
-                    }
-                }
+                metal_compute_pixels(width, height, width_reciprocal, height_reciprocal, size, size_x, center_x, center_y, iterations, stored_pixels, pixel, METAL_INTERVAL);
 
                 if (state == STATE_PREVIEW || SHOW_PREVIEW_WHEN_RENDERING)
                 {

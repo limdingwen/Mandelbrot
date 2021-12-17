@@ -1,9 +1,6 @@
 #ifndef BigFloat_h
 #define BigFloat_h
 
-#include <stdint.h>
-#include <stdbool.h>
-
 enum sign
 {
     SIGN_NEG,
@@ -13,13 +10,13 @@ enum sign
 
 struct fp256
 {
-    enum sign sign;
+    int sign;
     uint32_t man[8];
 };
 
 struct fp512
 {
-    enum sign sign;
+    int sign;
     uint32_t man[16];
 };
 
@@ -168,7 +165,7 @@ struct fp256 fp_smul256(struct fp256 a, struct fp256 b)
     else
         sign = SIGN_POS;
 
-    struct fp512 c = {0};
+    struct fp512 c = { SIGN_POS, {0} };
     for (int i = 7; i >= 0; i--) // a
     {
         for (int j = 7; j >= 0; j--) // b
@@ -178,7 +175,7 @@ struct fp256 fp_smul256(struct fp256 a, struct fp256 b)
             int high_offset = low_offset - 1;
 
             uint64_t mult = (uint64_t)a.man[i] * (uint64_t)b.man[j];
-            struct fp512 temp = {0};
+            struct fp512 temp = { SIGN_POS, {0} };
             temp.man[low_offset] = (uint32_t)mult;
             temp.man[high_offset] = mult >> 32;
 
@@ -226,7 +223,7 @@ struct fp256 int_to_fp256(int a)
     if (a == 0)
         return (struct fp256){ SIGN_ZERO, {0} };
     
-    struct fp256 b = {0};
+    struct fp256 b = { SIGN_POS, {0} };
     if (a < 0)
     {
         b.sign = SIGN_NEG;

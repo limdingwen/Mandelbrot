@@ -27,6 +27,8 @@
 		D95BA147276BAC87003DEA0D /* libpng16.a in Frameworks */ = {isa = PBXBuildFile; fileRef = D95BA145276BAC87003DEA0D /* libpng16.a */; };
 		D95BA149276BACEF003DEA0D /* libiconv.tbd in Frameworks */ = {isa = PBXBuildFile; fileRef = D95BA148276BACEF003DEA0D /* libiconv.tbd */; };
 		D95BA14A276BAD34003DEA0D /* zoom.png in CopyFiles */ = {isa = PBXBuildFile; fileRef = D95BA0E4276B9FB3003DEA0D /* zoom.png */; };
+		D95BA152276C4B70003DEA0D /* MetalKernel.metal in Sources */ = {isa = PBXBuildFile; fileRef = D95BA151276C4B70003DEA0D /* MetalKernel.metal */; };
+		D95BA154276C4B8C003DEA0D /* MetalCompute.m in Sources */ = {isa = PBXBuildFile; fileRef = D95BA153276C4B8C003DEA0D /* MetalCompute.m */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXCopyFilesBuildPhase section */
@@ -77,6 +79,8 @@
 		D95BA148276BACEF003DEA0D /* libiconv.tbd */ = {isa = PBXFileReference; lastKnownFileType = "sourcecode.text-based-dylib-definition"; name = libiconv.tbd; path = usr/lib/libiconv.tbd; sourceTree = SDKROOT; };
 		D95BA14B276BB51F003DEA0D /* .gitignore */ = {isa = PBXFileReference; lastKnownFileType = text; path = .gitignore; sourceTree = "<group>"; };
 		D95BA150276C301C003DEA0D /* BigFloat.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = BigFloat.h; sourceTree = "<group>"; };
+		D95BA151276C4B70003DEA0D /* MetalKernel.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = MetalKernel.metal; sourceTree = "<group>"; };
+		D95BA153276C4B8C003DEA0D /* MetalCompute.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = MetalCompute.m; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -111,6 +115,8 @@
 		D95BA0CE276B9F56003DEA0D = {
 			isa = PBXGroup;
 			children = (
+				D95BA153276C4B8C003DEA0D /* MetalCompute.m */,
+				D95BA151276C4B70003DEA0D /* MetalKernel.metal */,
 				D95BA150276C301C003DEA0D /* BigFloat.h */,
 				D95BA14B276BB51F003DEA0D /* .gitignore */,
 				D95BA0E1276B9FA7003DEA0D /* main.c */,
@@ -213,6 +219,8 @@
 			buildActionMask = 2147483647;
 			files = (
 				D95BA0E2276B9FA7003DEA0D /* main.c in Sources */,
+				D95BA154276C4B8C003DEA0D /* MetalCompute.m in Sources */,
+				D95BA152276C4B70003DEA0D /* MetalKernel.metal in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
