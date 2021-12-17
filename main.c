@@ -1,12 +1,23 @@
-// INTRODUCTION
+// ################
+// # INTRODUCTION #
+// ################
 //
-// Welcome to Mandelbrot, with big floats. This is a work in progress, so in the
-// meantime, here's a TODO list of things I still need to do.
+// Welcome to Mandelbrot, with big floats. This program allows you to
+// interactively zoom into the fractal, or render a deep-zoom movie up to a max
+// limit of 10^57 zoom.
 //
-// TODO: Documentation (woo literate programming!)
-// TODO: Try using Metal🤘 to speed up rendering
+// Youtube link:
+// Downloads (currently ARM Mac-only):
+// (If you want Intel Mac or Intel Windows version just contact me)
 //
-// COMPILATION
+// This is the CPU bigfloat version.
+// CPU doubles version (faster but 10^15 limit):
+// GPU OpenCL version (slower):
+// GPU Metal version (slower and may crash your Mac):
+//
+// ###############
+// # COMPILATION #
+// ###############
 //
 // This program was originally written for Clang+Make, then ported to XCode.
 // As such, I'll only provide general instructions for building this.
@@ -20,7 +31,9 @@
 // to find their header files. Finally, remember that zoom.png needs to
 // accompany the binary.
 //
-// OUTLINE
+// ###########
+// # OUTLINE #
+// ###########
 //
 // This version of the program has two modes; preview and full-sized rendering.
 // Both modes are nearly identical except for the resolution in which they are
@@ -37,7 +50,9 @@
 //
 // There's actually a movie mode as well TODO: Add
 //
-// BIG FLOAT
+// #############
+// # BIG FLOAT #
+// #############
 //
 // One of the core parts of Mandelbrot is the floating point precision, so it
 // makes sense to go over them first.
@@ -424,19 +439,143 @@ struct fp256 int_to_fp256(int a)
     return b;
 }
 
-#include "SDL2/SDL_video.h"
-#include <SDL2/SDL.h>
-#include <SDL2/SDL_image.h>
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wconversion"
-#define STB_IMAGE_WRITE_IMPLEMENTATION
-#include "stb_image_write.h"
-#pragma clang diagnostic pop
-#include <stdio.h>
-#include <pthread.h>
+// ##############
+// # MANDELBROT #
+// ##############
+//
+// The heart of the fractal. This function returns if a particular math
+// coordinate is in the set, and if not, returns how many iterations it took to
+// escape.
+
+struct mb_result
+{
+    bool is_in_set;
+    unsigned long long escape_iterations;
+};
+
+// This is a direct replica of this psuedocode from Wikipedia:
+//
+// x2 := 0
+// y2 := 0
+//
+// while (x2 + y2 ≤ 4 and iteration < max_iteration) do
+//     y := 2 × x × y + y0
+//     x := x2 - y2 + x0
+//     x2 := x × x
+//     y2 := y × y
+//     iteration := iteration + 1
+//
+// https://en.wikipedia.org/wiki/Plotting_algorithms_for_the_Mandelbrot_set#Optimized_escape_time_algorithms
+
+struct mb_result process_mandelbrot(struct fp256 math_x, struct fp256 math_y, unsigned long long iterations)
+{
+    struct fp256 x2 = { SIGN_ZERO, {0} };
+    struct fp256 y2 = { SIGN_ZERO, {0} };
+    struct fp256 x = { SIGN_ZERO, {0} };
+    struct fp256 y = { SIGN_ZERO, {0} };
+
+    for (unsigned long long i = 0; i < iterations; i++)
+    {
+        y = fp_sadd256(fp_asl256(fp_smul256(x, y)), math_y);
+        x = fp_sadd256(fp_ssub256(x2, y2), math_x);
+        x2 = fp_ssqr256(x);
+        y2 = fp_ssqr256(y);
+        if (fp_sadd256(x2, y2).man[0] >= 4) // Escape radius is 2.
+            return (struct mb_result){ false, i };
+    }
+    return (struct mb_result){ true, -1ULL };
+}
+
+// Next, we will be using the "square root" algorithm (chosen for its simplicity
+// and consistency in deep zooms) for colouring the set.
+//
+// The gradient is set to loop for every sqrt(GRADIENT_ITERATION_SIZE)
+// number of iterations. It used to be that 2^x would give better performance,
+// but since we're now using fmod(), I'm no longer so sure.
+
+#define GRADIENT_ITERATION_SIZE 16
+
+// We define the actual gradient, in 0-255 RGB format. We also duplicate
+// the first and last stops, so that it will be easier for the program to loop.
+
+struct color
+{
+    float r;
+    float g;
+    float b;
+};
+
+#define GRADIENT_STOP_COUNT 4
+const struct color gradient_stops[GRADIENT_STOP_COUNT + 1] =
+{
+    { 0x44, 0x44, 0xFF },
+    { 0x44, 0xFF, 0x44 },
+    { 0xFF, 0xFF, 0x44 },
+    { 0xFF, 0x44, 0x44 },
+    { 0x44, 0x44, 0xFF }, // For looping
+};
+
+// We define a trivial function for lerping between two colors for the
+// gradient to use. We also clamp x so that colors may not end up as more than
+// 255 or less than 0.
+
+struct color color_lerp(struct color a, struct color b, float x)
+{
+    if (x > 1) x = 1;
+    if (x < 0) x = 0;
+    return (struct color)
+    {
+        a.r + (b.r - a.r)*x,
+        a.g + (b.g - a.g)*x,
+        a.b + (b.b - a.b)*x
+    };
+}
+
+// We use a gradient struct instead of the configuration seen above so we do not
+// tie our implementation to this source file. Rather, any caller may pass in
+// any gradient configuration to our function.
+
+struct gradient
+{
+    int stop_count;
+    int size;
+    const struct color *stops;
+};
+
 #include <math.h>
 
-// RENDERING CONFIGURATION
+struct color gradient_color(struct gradient gradient, float x)
+{
+
+// We make the gradient loop...
+
+    x = fmodf(x, (float)gradient.size);
+
+// Then we calculate the two color stop indexes that we'll be lerping between.
+// We do this by first calculating where on the gradient we are on a floating-
+// point range from 0 (inclusive) to stop_count (exclusive). Then we floor it
+// into an int, producing an int value from 0 to stop_count - 1.
+
+// Then we just +1 that to get the next color stop index. You can see from this
+// why it was important to duplicate the first color stop as stops[stop_count],
+// to loop.
+
+    int stop_prev = (int)((float)x / (float)gradient.size * (float)gradient.stop_count);
+    int stop_next = stop_prev + 1;
+
+// Then, using a bit of duplicated code, we determine where between the two
+// color stops we are, in a range from 0 to 1.
+    
+    float stop_x = (float)x / (float)gradient.size * (float)gradient.stop_count - (float)stop_prev;
+
+// Then we may use that information to lerp between the two color stops.
+    
+    return color_lerp(gradient.stops[stop_prev], gradient.stops[stop_next], stop_x);
+}
+
+// #############
+// # RENDERING #
+// #############
 //
 // First, let's define some properties for full-sized rendering. We assume that
 // full-size is 1:1 to the window, and thus window size = full-size dimensions.
@@ -444,11 +583,19 @@ struct fp256 int_to_fp256(int a)
 #define WINDOW_WIDTH 1920
 #define WINDOW_HEIGHT 1080
 
+// Then, we'll need to have a way to convert from height to width.
+// In this case, ratio = width / height and thus width = height * ratio.
+
+#define SIZE_RATIO_X (struct fp256){ SIGN_POS, { 1, 0xC71C71C71C71C71C, 0x71C71C71C71C71C7, 0x1C71C71C71C71C71 } } // 1920/1080
+
 // Here, we also define reciprocals (1/x) of the width and height, as our big
 // float implementation is currently unable to divide; only multiply. We will
 // elaborate on the big float implementation later. Currently, this represents
 // the raw hexadecimal value of the big float as converting from a decimal
 // value is too difficult.
+//
+// Note that you may use the dec2hex.py program that came alongside to help you
+// convert between decimals and hex. Alternatively, use Wolfram Alpha.
 
 #define WINDOW_WIDTH_RECIPROCAL  (struct fp256){ SIGN_POS,  { 0, 0x0022222222222222, 0x2222222222222222, 0x2222222222222222 } }
 #define WINDOW_HEIGHT_RECIPROCAL (struct fp256){ SIGN_POS,  { 0, 0x003CAE759203CAE7, 0x59203CAE759203CA, 0xE759203CAE759203 } }
@@ -524,37 +671,110 @@ const struct thread_block preview_thread_blocks[THREADS] =
     { 180, 239, 80, 159 },
 };
 
-// GRADIENT CONFIGURATION
+// This function allows us to turn a screen position + size + center into a math
+// position.
 //
-// Next, we'll define the color gradient for all the diverging values of the
-// mandelbrot set. The gradient is set to loop for every GRADIENT_ITERATION_SIZE
-// number of iterations. Since the program will use modulus to loop the
-// gradient, using a power-of-two number hopefully triggers the compiler
-// optimiser to use a mask instead. This is important since gradient is
-// calculated for every pixel on the screen.
+// math_pos = (screen_pos / width) * size + (center - 2 * size)
+//
+// Where width may be width or height, and size may be size_y or size_x. This
+// function is supposed to be called once per dimension.
 
-#define GRADIENT_ITERATION_SIZE 16 // Use 2^x for best performance
-
-// Next, we define the actual gradient, in 0-255 RGB format. We also duplicate
-// the first and last stops, so that it will be easier for the program to loop
-// it later on, as you will see.
-
-struct color
+struct fp256 calculateMathPos(int screen_pos, struct fp256 width_reciprocal, struct fp256 size, struct fp256 center)
 {
-    float r;
-    float g;
-    float b;
+    struct fp256 offset = fp_ssub256(center, fp_asr256(size));
+    return fp_sadd256(fp_smul256(fp_smul256(int_to_fp256(screen_pos), width_reciprocal), size), offset);
+}
+
+// This is the entry-point for each thread that will be spawned. Note that we
+// pass all the data needed for it to render the block it is allocated to.
+// Width/height etc may change depending on the resolution of render. We also
+// pass a pointer to the pixels buffer, that will be write-only for the duration
+// of the thread.
+//
+// Also note that the thread is one-off; that is, each thread only lives for 1
+// frame, before another one is created for the next frame. There may be an
+// overhead from doing so but I have not noticed any significant slowdowns.
+
+struct thread_data
+{
+    int x_start;
+    int x_end;
+    int y_start;
+    int y_end;
+    int width;
+    int height;
+    struct fp256 width_reciprocal;
+    struct fp256 height_reciprocal;
+    struct fp256 size;
+    struct fp256 center_x;
+    struct fp256 center_y;
+    unsigned long long iterations;
+    uint8_t *pixels;
 };
 
-#define GRADIENT_STOP_COUNT 4
-const struct color gradient_stops[GRADIENT_STOP_COUNT + 1] =
+#include <pthread.h>
+
+void *thread(void *arg)
 {
-    { 0x44, 0x44, 0xFF },
-    { 0x44, 0xFF, 0x44 },
-    { 0xFF, 0xFF, 0x44 },
-    { 0xFF, 0x44, 0x44 },
-    { 0x44, 0x44, 0xFF }, // For looping
-};
+
+// First, we loop through all of the pixels we're responsible for, and calculate
+// the math coordinates as necessary.
+    
+    struct thread_data *data = (struct thread_data*)arg;
+    struct fp256 size_x = fp_smul256(data->size, SIZE_RATIO_X);
+
+    for (int screen_x = data->x_start; screen_x <= data->x_end; screen_x++)
+    {
+        struct fp256 math_x = calculateMathPos(screen_x, data->width_reciprocal, size_x, data->center_x);
+
+        for (int screen_y = data->y_start; screen_y <= data->y_end; screen_y++)
+        {
+            struct fp256 math_y = calculateMathPos(data->height - screen_y, data->height_reciprocal, data->size, data->center_y);
+            
+// From there, we can calculate the Mandelbrot result from the math coordinates,
+// and assign it a color using our gradient function (or just black).
+            
+            struct mb_result result = process_mandelbrot(math_x, math_y, data->iterations);
+
+            struct color color;
+            if (result.is_in_set)
+                color = (struct color){ 0, 0, 0 };
+            else
+            {
+                const static struct gradient gradient =
+                {
+                    GRADIENT_STOP_COUNT,
+                    GRADIENT_ITERATION_SIZE,
+                    gradient_stops
+                };
+                color = gradient_color(gradient, (float)sqrt((double)result.escape_iterations));
+            }
+            
+// Pixels are stored in a RGBA format, with 1 byte per channel.
+            
+            int r_offset = (screen_y*data->width + screen_x)*4;
+            data->pixels[r_offset + 0] = (uint8_t) color.r;
+            data->pixels[r_offset + 1] = (uint8_t) color.g;
+            data->pixels[r_offset + 2] = (uint8_t) color.b;
+            data->pixels[r_offset + 3] = 255;
+        }
+    }
+
+// Finally, it's good practice to exit using this function just in case we need
+// to return anything.
+    
+    pthread_exit(NULL);
+}
+
+#include "SDL2/SDL_video.h"
+#include <SDL2/SDL.h>
+#include <SDL2/SDL_image.h>
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wconversion"
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include "stb_image_write.h"
+#pragma clang diagnostic pop
+#include <stdio.h>
 
 // OTHER CONFIGURATION
 //
@@ -565,7 +785,6 @@ const struct color gradient_stops[GRADIENT_STOP_COUNT + 1] =
 #define INITIAL_CENTER_X (struct fp256){ SIGN_NEG, { 0, 0x8000000000000000, 0, 0 } } // -0.5
 #define INITIAL_CENTER_Y (struct fp256){ SIGN_ZERO, {0} } // 0
 #define INITIAL_SIZE (struct fp256){ SIGN_POS, { 2, 0, 0, 0 }} // 2
-#define SIZE_RATIO_X (struct fp256){ SIGN_POS, { 1, 0xC71C71C71C71C71C, 0x71C71C71C71C71C7, 0x1C71C71C71C71C71 } } // 1920/1080
 
 // The program uses a click-to-zoom mechanic, and thus we need to show the user
 // an image so the user knows where they will be zooming into. As with all
@@ -589,7 +808,7 @@ const struct color gradient_stops[GRADIENT_STOP_COUNT + 1] =
 #define ZOOM_IMAGE_SIZE_X 225
 #define ZOOM_IMAGE_SIZE_Y 150
 
-#define MOVIE 1
+#define MOVIE 0
 #define MOVIE_FULL_SHOW_X_INTERVAL 160
 // Coordinates from "Eye of the Universe"
 #define MOVIE_INITIAL_CENTER_X (struct fp256){ SIGN_POS, { 0, 0x5C38B7BB42D6E499, 0x134BFE5798655AA0, 0xCB8925EC9853B954 } }
@@ -598,146 +817,11 @@ const struct color gradient_stops[GRADIENT_STOP_COUNT + 1] =
 //#define MOVIE_ZOOM_PER_FRAME   (struct fp256){ SIGN_POS, { 0, 0xFD0F413D0D9C5EF1, 0xDBE485CFBA44A80F, 0x30D9409A2D2212AF } } // 0.5 / 60
 #define MOVIE_PREFIX "movie/frame"
 #define MOVIE_PREFIX_LEN 11
-#define MOVIE_INITIAL_FRAME 1724
+#define MOVIE_INITIAL_FRAME 1984
 
 #define INITIAL_ITERATIONS 64
 
-// GRADIENT IMPLEMENTATION
-//
-// We have already defined the structure of color in GRADIENT CONFIGURATION,
-// as it was needed at the time. Here, we shall define a trivial function for
-// lerping between two colors, for the gradient to use. We also clamp x so that
-// colors may not end up as more than 255 or less than 0.
-
-struct color color_lerp(struct color a, struct color b, float x)
-{
-    if (x > 1) x = 1;
-    if (x < 0) x = 0;
-    return (struct color)
-    {
-        a.r + (b.r - a.r)*x,
-        a.g + (b.g - a.g)*x,
-        a.b + (b.b - a.b)*x
-    };
-}
-
-// We use a gradient struct instead of the configuration seen above so we do not
-// tie our implementation to this source file. Rather, any caller may pass in
-// any gradient configuration to our function.
-
-struct gradient
-{
-    int stop_count;
-    int size;
-    const struct color *stops;
-};
-
-// For a particular point on a looping gradient, return a color.
-
-struct color gradient_color(struct gradient gradient, float x)
-{
-
-// As said before, first we perform a modulus on x so to make the gradient loop.
-
-    x = fmodf(x, (float)gradient.size);
-
-// 
-
-    int stop_prev = (int)((float)x / (float)gradient.size * (float)gradient.stop_count);
-    int stop_next = stop_prev + 1;
-    float stop_x = (float)x / (float)gradient.size * (float)gradient.stop_count - (float)stop_prev;
-    return color_lerp(gradient.stops[stop_prev], gradient.stops[stop_next], stop_x);
-}
-
-
 // Thread
-
-struct fp256 calculateMathPos(int screen_pos, struct fp256 width_reciprocal, struct fp256 size, struct fp256 center)
-{
-    struct fp256 offset = fp_ssub256(center, fp_asr256(size));
-    return fp_sadd256(fp_smul256(fp_smul256(int_to_fp256(screen_pos), width_reciprocal), size), offset);
-}
-
-struct mb_result
-{
-    bool is_in_set;
-    unsigned long long escape_iterations;
-};
-
-struct mb_result process_mandelbrot(struct fp256 math_x, struct fp256 math_y, unsigned long long iterations)
-{
-    struct fp256 x2 = { SIGN_ZERO, {0} };
-    struct fp256 y2 = { SIGN_ZERO, {0} };
-    struct fp256 x = { SIGN_ZERO, {0} };
-    struct fp256 y = { SIGN_ZERO, {0} };
-
-    for (unsigned long long i = 0; i < iterations; i++)
-    {
-        y = fp_sadd256(fp_asl256(fp_smul256(x, y)), math_y);
-        x = fp_sadd256(fp_ssub256(x2, y2), math_x);
-        x2 = fp_ssqr256(x);
-        y2 = fp_ssqr256(y);
-        if (fp_sadd256(x2, y2).man[0] >= 4)
-            return (struct mb_result){ false, i };
-    }
-    return (struct mb_result){ true, -1ULL };
-}
-
-struct thread_data
-{
-    int x_start;
-    int x_end;
-    int y_start;
-    int y_end;
-    int width;
-    int height;
-    struct fp256 width_reciprocal;
-    struct fp256 height_reciprocal;
-    struct fp256 size;
-    struct fp256 center_x;
-    struct fp256 center_y;
-    unsigned long long iterations;
-    uint8_t *pixels;
-};
-
-void *thread(void *arg)
-{
-    struct thread_data *data = (struct thread_data*)arg;
-    struct fp256 size_x = fp_smul256(data->size, SIZE_RATIO_X);
-
-    for (int screen_x = data->x_start; screen_x <= data->x_end; screen_x++)
-    {
-        struct fp256 math_x = calculateMathPos(screen_x, data->width_reciprocal, size_x, data->center_x);
-
-        for (int screen_y = data->y_start; screen_y <= data->y_end; screen_y++)
-        {
-            struct fp256 math_y = calculateMathPos(data->height - screen_y, data->height_reciprocal, data->size, data->center_y);
-            struct mb_result result = process_mandelbrot(math_x, math_y, data->iterations);
-
-            struct color color;
-            if (result.is_in_set)
-                color = (struct color){ 0, 0, 0 };
-            else
-            {
-                const static struct gradient gradient =
-                {
-                    GRADIENT_STOP_COUNT,
-                    GRADIENT_ITERATION_SIZE,
-                    gradient_stops
-                };
-                color = gradient_color(gradient, (float)sqrt((double)result.escape_iterations));
-            }
-            
-            int r_offset = (screen_y*data->width + screen_x)*4;
-            data->pixels[r_offset + 0] = (uint8_t) color.r;
-            data->pixels[r_offset + 1] = (uint8_t) color.g;
-            data->pixels[r_offset + 2] = (uint8_t) color.b;
-            data->pixels[r_offset + 3] = 255;
-        }
-    }
-
-    pthread_exit(NULL);
-}
 
 int main()
 {
@@ -844,7 +928,7 @@ int main()
         STATE_PREVIEW,
         STATE_FULL
     };
-    enum state state = STATE_FULL;
+    enum state state = MOVIE ? STATE_FULL : STATE_PREVIEW;
     bool haveToRender = true;
 
     bool running = true;
