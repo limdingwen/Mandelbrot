@@ -7,29 +7,22 @@
 // limit of 10^57 zoom.
 //
 // Youtube link:
-// Downloads (currently ARM Mac-only):
-// (If you want Intel Mac or Intel Windows version just contact me)
 //
 // This is the CPU bigfloat version.
 // CPU doubles version (faster but 10^15 limit): https://github.com/limdingwen/Mandelbrot/tree/fast
 // GPU OpenCL version (slower): https://github.com/limdingwen/Mandelbrot/tree/bigfloat-gpu
 // GPU Metal version (slower and may crash your Mac): https://github.com/limdingwen/Mandelbrot/tree/bigfloat-metal
 //
-// ###############
-// # COMPILATION #
-// ###############
+// #############
+// # DOWNLOADS #
+// #############
 //
-// This program was originally written for Clang+Make, then ported to XCode.
-// As such, I'll only provide general instructions for building this.
+// M1 Mac: https://github.com/limdingwen/Mandelbrot/releases/download/v1.0.0/M1.Mac.zip
+// (If you want Intel Mac or Intel Windows version just contact me.)
 //
-// First of all, this program only supports ARM due to use of inline ARM asm.
-// If you would like x86 support, please contact me and I'll add it in; I just
-// don't want to waste my time if no one cares anyway.
-//
-// You only need to compile main.c, and remember to enable -Ofast optimisation.
-// You'll need to link SDL2 and SDL2_image, as well as tell the compiler where
-// to find their header files. Finally, remember that zoom.png needs to
-// accompany the binary.
+// All of these downloads are for interactive zooming; if you want to use the
+// movie rendering mode, you'll need to compile the code yourself, and edit the
+// configuration (search for #define MOVIE to find it).
 //
 // ###########
 // # OUTLINE #
@@ -48,8 +41,21 @@
 // Right click - Zoom out
 // Tab - Change between preview and full resolution (may take a long time!)
 //
-// There's actually a movie mode as well; search for #define MOVIE to see the
-// documentation for it.
+// ###############
+// # COMPILATION #
+// ###############
+//
+// This program was originally written for Clang+Make, then ported to XCode.
+// As such, I'll only provide general instructions for building this.
+//
+// First of all, this program only supports ARM due to use of inline ARM asm.
+// If you would like x86 support, please contact me and I'll add it in; I just
+// don't want to waste my time if no one cares anyway.
+//
+// You only need to compile main.c, and remember to enable -Ofast optimisation.
+// You'll need to link SDL2 and SDL2_image, as well as tell the compiler where
+// to find their header files. Finally, remember that zoom.png needs to
+// accompany the binary.
 //
 // #############
 // # BIG FLOAT #
@@ -825,8 +831,11 @@ void *thread(void *arg)
 // If MOVIE is 1, then the program will become non-interactive and render a
 // movie to disk instead. Some of the settings will be overriden with those seen
 // here.
+//
+// You may use the dec2hex.py program to generate your own hexadecimal
+// coordinates.
 
-#define MOVIE 1
+#define MOVIE 0
 #define MOVIE_FULL_SHOW_X_INTERVAL 480
 // Coordinates from "Eye of the Universe"
 #define MOVIE_INITIAL_CENTER_X (struct fp256){ SIGN_POS, { 0, 0x5C38B7BB42D6E499, 0x134BFE5798655AA0, 0xCB8925EC9853B954 } }
