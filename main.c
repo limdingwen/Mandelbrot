@@ -11,9 +11,9 @@
 // (If you want Intel Mac or Intel Windows version just contact me)
 //
 // This is the CPU bigfloat version.
-// CPU doubles version (faster but 10^15 limit):
-// GPU OpenCL version (slower):
-// GPU Metal version (slower and may crash your Mac):
+// CPU doubles version (faster but 10^15 limit): https://github.com/limdingwen/Mandelbrot/tree/fast
+// GPU OpenCL version (slower): https://github.com/limdingwen/Mandelbrot/tree/bigfloat-gpu
+// GPU Metal version (slower and may crash your Mac): https://github.com/limdingwen/Mandelbrot/tree/bigfloat-metal
 //
 // ###############
 // # COMPILATION #
@@ -555,7 +555,7 @@ struct color gradient_color(struct gradient gradient, float x)
 // We do this by first calculating where on the gradient we are on a floating-
 // point range from 0 (inclusive) to stop_count (exclusive). Then we floor it
 // into an int, producing an int value from 0 to stop_count - 1.
-
+//
 // Then we just +1 that to get the next color stop index. You can see from this
 // why it was important to duplicate the first color stop as stops[stop_count],
 // to loop.
@@ -651,7 +651,7 @@ const struct thread_block full_thread_blocks[THREADS] =
 // preview mode differs in that it is much smaller and faster to render, but
 // is almost identical in every other way.
 
-// TODO: Need new resolution
+// TODO: Need new resolution... but seems to still work for now?
 #define PREVIEW_WIDTH 240
 #define PREVIEW_HEIGHT 160
 #define PREVIEW_WIDTH_RECIPROCAL (struct fp256){ SIGN_POS,  { 0, 0x0111111111111111, 0x1111111111111111, 0x1111111111111111 } }
@@ -766,6 +766,17 @@ void *thread(void *arg)
     pthread_exit(NULL);
 }
 
+// ########
+// # MAIN #
+// ########
+//
+// I did intend to factor out various functions from main, but the way I
+// structured the code makes it not really worth the time. Let this be a lesson
+// to factor and comment early and not leave it to the last minute.
+//
+// Though... tell me if you like pure code more than semi-literate programming
+// as seen above?
+
 #include "SDL2/SDL_video.h"
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_image.h>
@@ -776,11 +787,7 @@ void *thread(void *arg)
 #pragma clang diagnostic pop
 #include <stdio.h>
 
-// OTHER CONFIGURATION
-//
-// First, the initial center and size of the view. Size represents the length
-// of the visible Y axis, while the X axis may be derived by multiplying by
-// SIZE_RATIO_X. This ratio may be derived using WINDOW_WIDTH / WINDOW_HEIGHT.
+// First, the initial mathematical center and size of the view.
 
 #define INITIAL_CENTER_X (struct fp256){ SIGN_NEG, { 0, 0x8000000000000000, 0, 0 } } // -0.5
 #define INITIAL_CENTER_Y (struct fp256){ SIGN_ZERO, {0} } // 0
@@ -808,8 +815,18 @@ void *thread(void *arg)
 #define ZOOM_IMAGE_SIZE_X 225
 #define ZOOM_IMAGE_SIZE_Y 150
 
-#define MOVIE 0
-#define MOVIE_FULL_SHOW_X_INTERVAL 160
+// We can also define how the iteration count increases. The iteration count
+// increases linearly.
+
+#define INITIAL_ITERATIONS 64
+#define ITERATIONS_PER_CLICK 64
+
+// If MOVIE is 1, then the program will become non-interactive and render a
+// movie to disk instead. Some of the settings will be overriden with those seen
+// here.
+
+#define MOVIE 1
+#define MOVIE_FULL_SHOW_X_INTERVAL 480
 // Coordinates from "Eye of the Universe"
 #define MOVIE_INITIAL_CENTER_X (struct fp256){ SIGN_POS, { 0, 0x5C38B7BB42D6E499, 0x134BFE5798655AA0, 0xCB8925EC9853B954 } }
 #define MOVIE_INITIAL_CENTER_Y (struct fp256){ SIGN_NEG, { 0, 0xA42D17BFC55EFB99, 0x9B8E8100EB7161E1, 0xCA1080A9F02EBC2A } }
@@ -817,11 +834,9 @@ void *thread(void *arg)
 //#define MOVIE_ZOOM_PER_FRAME   (struct fp256){ SIGN_POS, { 0, 0xFD0F413D0D9C5EF1, 0xDBE485CFBA44A80F, 0x30D9409A2D2212AF } } // 0.5 / 60
 #define MOVIE_PREFIX "movie/frame"
 #define MOVIE_PREFIX_LEN 11
-#define MOVIE_INITIAL_FRAME 1984
-
-#define INITIAL_ITERATIONS 64
-
-// Thread
+#define MOVIE_INITIAL_FRAME 2245
+#define MOVIE_INITIAL_ITERATIONS 64
+#define MOVIE_ITERATIONS_PER_FRAME 2
 
 int main()
 {
@@ -894,10 +909,11 @@ int main()
     puts("Mandelbrot started.");
 
     // Main loop
+    
     struct fp256 size = INITIAL_SIZE;
     struct fp256 center_x = MOVIE ? MOVIE_INITIAL_CENTER_X : INITIAL_CENTER_X;
     struct fp256 center_y = MOVIE ? MOVIE_INITIAL_CENTER_Y : INITIAL_CENTER_Y;
-    unsigned long long iterations = INITIAL_ITERATIONS;
+    unsigned long long iterations = MOVIE ? MOVIE_INITIAL_ITERATIONS : INITIAL_ITERATIONS;
     unsigned long long zoom = 0;
     int movie_current_frame = MOVIE_INITIAL_FRAME;
 
@@ -906,7 +922,7 @@ int main()
         for (int i = 0; i < MOVIE_INITIAL_FRAME - 1; i++)
         {
             size = fp_smul256(size, MOVIE_ZOOM_PER_FRAME);
-            iterations += 2; // TODO: Iterations setting
+            iterations += MOVIE_ITERATIONS_PER_FRAME;
             printf("Fast forward to frame %d...\n", i + 2);
         }
     }
@@ -1000,7 +1016,7 @@ int main()
                         center_x = calculateMathPos(mouse_x, WINDOW_WIDTH_RECIPROCAL, size_x, center_x);
                         center_y = calculateMathPos(WINDOW_HEIGHT - mouse_y, WINDOW_HEIGHT_RECIPROCAL, size, center_y);
                         size = fp_smul256(size, ZOOM);
-                        iterations += 64; // TODO: Iterations setting
+                        iterations += ITERATIONS_PER_CLICK;
                         zoom++;
                         printf("Zoom: 4^%llu\n", zoom);
                         memset(full_stored_pixels, 0, full_pixels_size);
@@ -1010,7 +1026,7 @@ int main()
                     {
                         haveToRender = true;
                         size = fp_smul256(size, ZOOM_RECIPROCAL);
-                        iterations -= 64; // TODO: Iterations setting
+                        iterations -= ITERATIONS_PER_CLICK;
                         zoom--;
                         printf("Zoom: 4^%llu\n", zoom);
                         memset(full_stored_pixels, 0, full_pixels_size);
@@ -1173,7 +1189,7 @@ int main()
 
                 haveToRender = true;
                 size = fp_smul256(size, MOVIE_ZOOM_PER_FRAME);
-                iterations += 2; // TODO: Iterations setting
+                iterations += MOVIE_ITERATIONS_PER_FRAME;
                 printf("Frame: %d\n", movie_current_frame);
                 memset(full_stored_pixels, 0, full_pixels_size);
                 memset(preview_stored_pixels, 0, preview_pixels_size);
