@@ -48,7 +48,8 @@
 // Right click - Zoom out
 // Tab - Change between preview and full resolution (may take a long time!)
 //
-// There's actually a movie mode as well TODO: Add
+// There's actually a movie mode as well; search for #define MOVIE to see the
+// documentation for it.
 //
 // #############
 // # BIG FLOAT #
