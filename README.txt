@@ -6,7 +6,7 @@
 // interactively zoom into the fractal, or render a deep-zoom movie up to a max
 // limit of 10^57 zoom.
 //
-// Youtube link:
+// Youtube link: https://www.youtube.com/watch?v=AGpmu8wq2v8
 //
 // This is the CPU bigfloat version.
 // CPU doubles version (faster but 10^15 limit): https://github.com/limdingwen/Mandelbrot/tree/fast
